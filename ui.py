@@ -8,10 +8,12 @@ import sys
 from pathlib import Path
 from typing import Iterator
 
+print("Loading Gradio UI...", flush=True)
 import gradio as gr
 
 DRIVE_ROOT = Path(os.environ.get("TRANSCRIBER_DRIVE_ROOT", "/content/drive/MyDrive")).resolve()
 APP_PATH = Path(__file__).with_name("app.py").resolve()
+APP_PYTHON = os.environ.get("TRANSCRIBER_APP_PYTHON") or sys.executable
 SUPPORTED_EXTENSIONS = {".mp4", ".mp3", ".m4a", ".wav"}
 
 
@@ -83,7 +85,7 @@ def transcribe(selected: str | None) -> Iterator[tuple[str, str | None, str | No
 
     env = os.environ.copy()
     process = subprocess.Popen(
-        [sys.executable, str(APP_PATH), str(source)],
+        [APP_PYTHON, "-u", str(APP_PATH), str(source)],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -157,10 +159,10 @@ def main() -> None:
     username = "transcriber"
     password = os.environ.get("TRANSCRIBER_UI_PASSWORD") or secrets.token_urlsafe(12)
 
-    print("\nInterview Transcriber UI credentials")
-    print(f"Username: {username}")
-    print(f"Password: {password}")
-    print("Keep the temporary Gradio URL and password private.\n")
+    print("\nInterview Transcriber UI credentials", flush=True)
+    print(f"Username: {username}", flush=True)
+    print(f"Password: {password}", flush=True)
+    print("Keep the temporary Gradio URL and password private.\n", flush=True)
 
     demo = build_ui()
     demo.queue(default_concurrency_limit=1)
