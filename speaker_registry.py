@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 
+from exporters import write_canonical_transcript
 from speaker_benchmark import (
     EMBEDDING_MODEL,
     _build_chunks,
@@ -127,7 +128,9 @@ def _source_embeddings(source: Path) -> tuple[dict[str, list[np.ndarray]], dict[
         "source": str(source),
         "transcript": str(_transcript_path(source)),
         "detected_speakers": detected,
-        "chunks_per_speaker": {speaker: len(vectors) for speaker, vectors in embeddings.items()},
+        "chunks_per_speaker": {
+            speaker: len(vectors) for speaker, vectors in embeddings.items()
+        },
         "representative_segments": _representative_segments(segments),
     }
 
@@ -136,11 +139,15 @@ def _identity_prototype(identity: dict[str, Any]) -> np.ndarray:
     refs = identity.get("embeddings") or []
     if not refs:
         raise RuntimeError(f"Registry identity {identity.get('speaker_id')} has no embeddings.")
-    vectors = np.stack([_normalize(np.asarray(vector, dtype=np.float32)) for vector in refs])
+    vectors = np.stack(
+        [_normalize(np.asarray(vector, dtype=np.float32)) for vector in refs]
+    )
     return _normalize(np.mean(vectors, axis=0))
 
 
-def _candidate_prototypes(embeddings: dict[str, list[np.ndarray]]) -> dict[str, np.ndarray]:
+def _candidate_prototypes(
+    embeddings: dict[str, list[np.ndarray]],
+) -> dict[str, np.ndarray]:
     return {
         speaker: _normalize(np.mean(np.stack(vectors), axis=0))
         for speaker, vectors in embeddings.items()
@@ -148,7 +155,9 @@ def _candidate_prototypes(embeddings: dict[str, list[np.ndarray]]) -> dict[str, 
     }
 
 
-def _find_identity_by_name(registry: dict[str, Any], display_name: str) -> dict[str, Any] | None:
+def _find_identity_by_name(
+    registry: dict[str, Any], display_name: str
+) -> dict[str, Any] | None:
     wanted = display_name.strip().casefold()
     for identity in registry["speakers"]:
         if str(identity.get("display_name") or "").strip().casefold() == wanted:
@@ -174,7 +183,8 @@ def enroll_speaker(
     vectors = embeddings.get(diarization_speaker)
     if not vectors or len(vectors) < MIN_CHUNKS:
         raise RuntimeError(
-            f"{diarization_speaker} does not have enough usable speech. Need at least {MIN_CHUNKS} chunks."
+            f"{diarization_speaker} does not have enough usable speech. "
+            f"Need at least {MIN_CHUNKS} chunks."
         )
 
     registry = load_registry(registry_path)
@@ -216,7 +226,9 @@ def enroll_speaker(
         "diarization_speaker": diarization_speaker,
         "chunks_added": len(vectors),
         "reference_embeddings": len(identity["embeddings"]),
-        "representative_segment": (meta.get("representative_segments") or {}).get(diarization_speaker),
+        "representative_segment": (
+            meta.get("representative_segments") or {}
+        ).get(diarization_speaker),
     }
 
 
@@ -226,12 +238,16 @@ def recognize_speakers(source: Path, registry_path: Path) -> dict[str, Any]:
     embeddings, meta = _source_embeddings(source)
     candidates = _candidate_prototypes(embeddings)
 
-    identities = [identity for identity in registry["speakers"] if identity.get("embeddings")]
+    identities = [
+        identity for identity in registry["speakers"] if identity.get("embeddings")
+    ]
     identity_prototypes = {
         str(identity["speaker_id"]): _identity_prototype(identity)
         for identity in identities
     }
-    identity_by_id = {str(identity["speaker_id"]): identity for identity in identities}
+    identity_by_id = {
+        str(identity["speaker_id"]): identity for identity in identities
+    }
 
     matrix: dict[str, dict[str, float]] = {}
     for diarization_speaker, candidate in sorted(candidates.items()):
@@ -266,7 +282,11 @@ def recognize_speakers(source: Path, registry_path: Path) -> dict[str, Any]:
                     "diarization_speaker": diarization_speaker,
                     "resolved_name": None,
                     "status": "UNKNOWN",
-                    "reason": "registry_empty" if not identities else "insufficient_usable_speech",
+                    "reason": (
+                        "registry_empty"
+                        if not identities
+                        else "insufficient_usable_speech"
+                    ),
                     "chunks": chunk_count,
                     "score": None,
                     "runner_up_score": None,
@@ -280,11 +300,24 @@ def recognize_speakers(source: Path, registry_path: Path) -> dict[str, Any]:
         ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         best_identity_id, best_score = ranked[0]
         runner_up_score = ranked[1][1] if len(ranked) > 1 else None
-        margin = best_score - runner_up_score if runner_up_score is not None else None
-        unique_best = best_candidate_for_identity.get(best_identity_id) == diarization_speaker
+        margin = (
+            best_score - runner_up_score if runner_up_score is not None else None
+        )
+        unique_best = (
+            best_candidate_for_identity.get(best_identity_id)
+            == diarization_speaker
+        )
         similarity_ok = best_score >= SIMILARITY_THRESHOLD
-        margin_ok = runner_up_score is None or (margin is not None and margin >= MARGIN_THRESHOLD)
-        known = chunk_count >= MIN_CHUNKS and similarity_ok and margin_ok and unique_best
+        margin_ok = (
+            runner_up_score is None
+            or (margin is not None and margin >= MARGIN_THRESHOLD)
+        )
+        known = (
+            chunk_count >= MIN_CHUNKS
+            and similarity_ok
+            and margin_ok
+            and unique_best
+        )
 
         reasons: list[str] = []
         if chunk_count < MIN_CHUNKS:
@@ -324,6 +357,79 @@ def recognize_speakers(source: Path, registry_path: Path) -> dict[str, Any]:
     }
 
 
+def apply_recognition(source: Path, registry_path: Path) -> dict[str, Any]:
+    """Resolve confident names in canonical JSON and regenerate TXT/DOCX."""
+    source = source.expanduser().resolve()
+    report = recognize_speakers(source, registry_path)
+    transcript = _load_transcript(source)
+
+    known_by_speaker = {
+        str(item["diarization_speaker"]): str(item["resolved_name"])
+        for item in report["results"]
+        if item.get("status") == "KNOWN" and item.get("resolved_name")
+    }
+
+    updated_segments = 0
+    for segment in transcript.get("segments") or []:
+        speaker = str(segment.get("speaker") or "UNKNOWN")
+        resolved_name = known_by_speaker.get(speaker)
+        if segment.get("resolved_name") != resolved_name:
+            updated_segments += 1
+        segment["resolved_name"] = resolved_name
+
+    compact_results = [
+        {
+            "diarization_speaker": item.get("diarization_speaker"),
+            "status": item.get("status"),
+            "resolved_name": item.get("resolved_name"),
+            "matched_speaker_id": item.get("matched_speaker_id"),
+            "matched_display_name": item.get("matched_display_name"),
+            "score": item.get("score"),
+            "runner_up_score": item.get("runner_up_score"),
+            "margin": item.get("margin"),
+            "unique_best": item.get("unique_best"),
+            "chunks": item.get("chunks"),
+            "reason": item.get("reason"),
+        }
+        for item in report["results"]
+    ]
+
+    transcript["speaker_resolution"] = {
+        "resolved_at": _now(),
+        "registry": report["registry"],
+        "embedding_model": report["embedding_model"],
+        "thresholds": report["thresholds"],
+        "known_identity_count": report["known_identity_count"],
+        "results": compact_results,
+    }
+
+    outputs = write_canonical_transcript(transcript, source)
+    report["applied"] = True
+    report["updated_segments"] = updated_segments
+    report["resolved_speakers"] = known_by_speaker
+    report["outputs"] = {key: str(path) for key, path in outputs.items()}
+    return report
+
+
+def registry_overview(registry_path: Path) -> dict[str, Any]:
+    registry = load_registry(registry_path)
+    return {
+        "registry": str(registry_path.expanduser().resolve()),
+        "embedding_model": registry.get("embedding_model"),
+        "thresholds": registry.get("thresholds") or {},
+        "known_identity_count": len(registry.get("speakers") or []),
+        "speakers": [
+            {
+                "speaker_id": identity.get("speaker_id"),
+                "display_name": identity.get("display_name"),
+                "reference_embeddings": len(identity.get("embeddings") or []),
+                "sources": len(identity.get("provenance") or []),
+            }
+            for identity in registry.get("speakers") or []
+        ],
+    }
+
+
 def _write_report(report: dict[str, Any], output: Path | None) -> None:
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     if output:
@@ -343,10 +449,20 @@ def parse_args() -> argparse.Namespace:
     enroll.add_argument("--registry", type=Path, required=True)
     enroll.add_argument("--output", type=Path)
 
-    recognize = subparsers.add_parser("recognize", help="Match diarized speakers against the registry.")
+    recognize = subparsers.add_parser(
+        "recognize", help="Preview matches against the registry."
+    )
     recognize.add_argument("source", type=Path)
     recognize.add_argument("--registry", type=Path, required=True)
     recognize.add_argument("--output", type=Path)
+
+    apply_parser = subparsers.add_parser(
+        "apply",
+        help="Apply confident registry matches to canonical JSON and regenerate TXT/DOCX.",
+    )
+    apply_parser.add_argument("source", type=Path)
+    apply_parser.add_argument("--registry", type=Path, required=True)
+    apply_parser.add_argument("--output", type=Path)
 
     show = subparsers.add_parser("list", help="Show registry metadata without embeddings.")
     show.add_argument("--registry", type=Path, required=True)
@@ -366,24 +482,14 @@ def main() -> None:
         )
     elif args.command == "recognize":
         report = recognize_speakers(args.source, args.registry)
+    elif args.command == "apply":
+        report = apply_recognition(args.source, args.registry)
+    elif args.command == "list":
+        report = registry_overview(args.registry)
     else:
-        registry = load_registry(args.registry)
-        report = {
-            "registry": str(args.registry.expanduser().resolve()),
-            "embedding_model": registry.get("embedding_model"),
-            "thresholds": registry.get("thresholds"),
-            "speakers": [
-                {
-                    "speaker_id": identity.get("speaker_id"),
-                    "display_name": identity.get("display_name"),
-                    "reference_embeddings": len(identity.get("embeddings") or []),
-                    "provenance_count": len(identity.get("provenance") or []),
-                    "updated_at": identity.get("updated_at"),
-                }
-                for identity in registry.get("speakers") or []
-            ],
-        }
-    _write_report(report, getattr(args, "output", None))
+        raise RuntimeError(f"Unsupported command: {args.command}")
+
+    _write_report(report, args.output)
 
 
 if __name__ == "__main__":
