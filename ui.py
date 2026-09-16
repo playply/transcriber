@@ -16,7 +16,14 @@ DRIVE_ROOT = Path(os.environ.get("TRANSCRIBER_DRIVE_ROOT", "/content/drive/MyDri
 APP_PATH = Path(__file__).with_name("app.py").resolve()
 BENCHMARK_PATH = Path(__file__).with_name("speaker_benchmark.py").resolve()
 CROSS_BENCHMARK_PATH = Path(__file__).with_name("speaker_cross_benchmark.py").resolve()
+REGISTRY_TOOL_PATH = Path(__file__).with_name("speaker_registry.py").resolve()
 APP_PYTHON = os.environ.get("TRANSCRIBER_APP_PYTHON") or sys.executable
+REGISTRY_PATH = Path(
+    os.environ.get(
+        "TRANSCRIBER_REGISTRY_PATH",
+        str(DRIVE_ROOT / "Interview Transcriber" / "_speaker_registry" / "registry.json"),
+    )
+).resolve()
 SUPPORTED_EXTENSIONS = {".mp4", ".mp3", ".m4a", ".wav"}
 
 
@@ -161,8 +168,7 @@ def _benchmark_summary(report: dict) -> str:
         f"Closed-set holdout accuracy: {accuracy_text} "
         f"({holdout.get('correct', 0)}/{holdout.get('queries', 0)})\n"
         f"Exploratory threshold: {threshold_text}\n\n"
-        "Automatic naming is still disabled. We will only standardize a threshold after "
-        "a second-recording validation with at least one recurring speaker."
+        "Automatic naming is still disabled in transcript outputs."
     )
 
 
@@ -182,14 +188,7 @@ def benchmark_speakers(selected: str | None) -> Iterator[str]:
         report_path = Path(tmp.name)
 
     process = subprocess.Popen(
-        [
-            APP_PYTHON,
-            "-u",
-            str(BENCHMARK_PATH),
-            str(source),
-            "--output",
-            str(report_path),
-        ],
+        [APP_PYTHON, "-u", str(BENCHMARK_PATH), str(source), "--output", str(report_path)],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -276,8 +275,8 @@ def _cross_benchmark_summary(report: dict) -> str:
     lines.extend(
         [
             "",
-            "Automatic naming is still disabled. Confirm which pair is actually the same person "
-            "from the timestamps/text above; the score is not yet a production threshold.",
+            "Automatic naming in transcript outputs is still disabled. Use the registry section "
+            "above to save confirmed identities and test recognition."
         ]
     )
     return "\n".join(lines)
@@ -295,13 +294,11 @@ def compare_recordings(
     for source in (reference, candidate):
         transcript_path = source.with_name(f"{source.stem}_transcript.json")
         if not transcript_path.is_file():
-            raise gr.Error(
-                f"Transcribe {source.name} first; its canonical JSON is required."
-            )
+            raise gr.Error(f"Transcribe {source.name} first; its canonical JSON is required.")
 
     yield (
         "Comparing speaker embeddings across two recordings. This is validation-only: "
-        "no names are assigned and nothing is written to the speaker registry."
+        "no names are assigned to transcript outputs."
     )
 
     env = os.environ.copy()
@@ -347,6 +344,203 @@ def compare_recordings(
     yield _cross_benchmark_summary(report)
 
 
+def _transcript_speaker_info(source: Path) -> tuple[list[str], str]:
+    transcript_path = source.with_name(f"{source.stem}_transcript.json")
+    if not transcript_path.is_file():
+        raise gr.Error("Transcribe this recording first; the canonical JSON is required.")
+
+    data = json.loads(transcript_path.read_text(encoding="utf-8"))
+    segments = data.get("segments") or []
+    speakers = sorted(
+        {
+            str(segment.get("speaker"))
+            for segment in segments
+            if segment.get("speaker") and segment.get("speaker") != "UNKNOWN"
+        }
+    )
+    lines: list[str] = []
+    for speaker in speakers:
+        candidates = [
+            segment
+            for segment in segments
+            if segment.get("speaker") == speaker
+            and segment.get("start") is not None
+            and segment.get("end") is not None
+        ]
+        if candidates:
+            example = max(
+                candidates,
+                key=lambda segment: float(segment["end"]) - float(segment["start"]),
+            )
+            text = str(example.get("text") or "").replace("\n", " ").strip()
+            if len(text) > 150:
+                text = text[:147] + "..."
+            lines.append(
+                f"{speaker}: {_format_time(example.get('start'))} — {text or '[no text]'}"
+            )
+        else:
+            lines.append(f"{speaker}: no representative segment")
+    return speakers, "\n".join(lines)
+
+
+def load_registry_speakers(selected: str | None):
+    source = _resolve_source(selected)
+    speakers, preview = _transcript_speaker_info(source)
+    value = speakers[0] if speakers else None
+    return gr.Dropdown(choices=speakers, value=value), preview
+
+
+def _run_registry_tool(arguments: list[str], error_prefix: str) -> dict:
+    env = os.environ.copy()
+    with tempfile.NamedTemporaryFile(prefix="speaker-registry-", suffix=".json", delete=False) as tmp:
+        report_path = Path(tmp.name)
+
+    command = [
+        APP_PYTHON,
+        "-u",
+        str(REGISTRY_TOOL_PATH),
+        *arguments,
+        "--output",
+        str(report_path),
+    ]
+    process = subprocess.Popen(
+        command,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    last_lines: list[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="", flush=True)
+        last_lines.append(line.rstrip())
+        if len(last_lines) > 80:
+            del last_lines[:-80]
+
+    return_code = process.wait()
+    if return_code != 0:
+        report_path.unlink(missing_ok=True)
+        tail = "\n".join(last_lines[-20:])
+        raise gr.Error(f"{error_prefix}. Last log lines:\n\n{tail}")
+
+    try:
+        return json.loads(report_path.read_text(encoding="utf-8"))
+    finally:
+        report_path.unlink(missing_ok=True)
+
+
+def enroll_registry_speaker(
+    selected: str | None,
+    diarization_speaker: str | None,
+    display_name: str | None,
+) -> Iterator[str]:
+    source = _resolve_source(selected)
+    if not diarization_speaker:
+        raise gr.Error("Load speakers and choose the speaker to save.")
+    name = (display_name or "").strip()
+    if not name:
+        raise gr.Error("Enter a name for this speaker.")
+
+    yield f"Saving {diarization_speaker} as {name}. Computing reference embeddings..."
+    report = _run_registry_tool(
+        [
+            "enroll",
+            str(source),
+            diarization_speaker,
+            name,
+            "--registry",
+            str(REGISTRY_PATH),
+        ],
+        "Could not save speaker to registry",
+    )
+    action = "Created" if report.get("created") else "Updated"
+    yield (
+        f"{action} identity: {report.get('display_name')} ({report.get('speaker_id')})\n"
+        f"Source speaker: {report.get('diarization_speaker')}\n"
+        f"Reference chunks added: {report.get('chunks_added')}\n"
+        f"Stored reference embeddings: {report.get('reference_embeddings')}\n"
+        f"Registry: {report.get('registry')}\n\n"
+        "Transcript outputs were not modified."
+    )
+
+
+def _recognition_summary(report: dict) -> str:
+    thresholds = report.get("thresholds") or {}
+    lines = [
+        f"Registry: {report.get('registry')}",
+        f"Known identities: {report.get('known_identity_count')}",
+        "Thresholds: "
+        f"similarity>={thresholds.get('similarity')}, "
+        f"margin>={thresholds.get('margin')}, "
+        f"min_chunks={thresholds.get('min_chunks')}",
+        "",
+    ]
+    for item in report.get("results") or []:
+        speaker = item.get("diarization_speaker")
+        status = item.get("status")
+        example = item.get("representative_segment") or {}
+        snippet = str(example.get("text") or "").replace("\n", " ").strip()
+        if len(snippet) > 110:
+            snippet = snippet[:107] + "..."
+        if status == "KNOWN":
+            lines.append(
+                f"{speaker} -> {item.get('resolved_name')} [KNOWN] "
+                f"score={_fmt_score(item.get('score'))}, "
+                f"margin={_fmt_score(item.get('margin'))}, "
+                f"unique_best={'yes' if item.get('unique_best') else 'no'}, "
+                f"chunks={item.get('chunks')}"
+            )
+        else:
+            best = item.get("matched_display_name")
+            best_text = f", best={best}" if best else ""
+            lines.append(
+                f"{speaker} -> UNKNOWN "
+                f"(score={_fmt_score(item.get('score'))}{best_text}, "
+                f"reason={item.get('reason')}, chunks={item.get('chunks')})"
+            )
+        if example:
+            lines.append(
+                f"  {_format_time(example.get('start'))} — {snippet or '[no text]'}"
+            )
+    lines.extend(
+        [
+            "",
+            "Recognition is preview-only in this slice; transcript JSON/TXT/DOCX are not rewritten yet.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def recognize_registry_speakers(selected: str | None) -> Iterator[str]:
+    source = _resolve_source(selected)
+    if not REGISTRY_PATH.is_file():
+        raise gr.Error("Speaker registry is empty. Save one confirmed speaker first.")
+
+    yield "Comparing detected speakers with the persistent registry..."
+    report = _run_registry_tool(
+        ["recognize", str(source), "--registry", str(REGISTRY_PATH)],
+        "Speaker recognition failed",
+    )
+    yield _recognition_summary(report)
+
+
+def registry_overview() -> str:
+    if not REGISTRY_PATH.is_file():
+        return f"Registry is empty. It will be created at:\n{REGISTRY_PATH}"
+    data = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    identities = data.get("speakers") or []
+    lines = [f"Registry: {REGISTRY_PATH}", f"Known identities: {len(identities)}"]
+    for identity in identities:
+        lines.append(
+            f"  {identity.get('display_name')} ({identity.get('speaker_id')}): "
+            f"{len(identity.get('embeddings') or [])} reference embeddings, "
+            f"{len(identity.get('provenance') or [])} source(s)"
+        )
+    return "\n".join(lines)
+
+
 def build_ui() -> gr.Blocks:
     if not DRIVE_ROOT.exists():
         raise RuntimeError(f"Google Drive is not mounted: {DRIVE_ROOT}")
@@ -378,10 +572,68 @@ def build_ui() -> gr.Blocks:
             concurrency_limit=1,
         )
 
+        with gr.Accordion("Speaker registry (MVP)", open=True):
+            gr.Markdown(
+                "Save a confirmed diarized speaker once, then test recognition on another "
+                "already-transcribed recording. Conservative matching: similarity >= 0.60, "
+                "margin >= 0.20 when a runner-up exists, at least 2 usable chunks, and a unique best match."
+            )
+            refresh_speakers = gr.Button("Load speakers from selected recording")
+            registry_speaker = gr.Dropdown(
+                choices=[],
+                label="Confirmed speaker in selected recording",
+            )
+            speaker_preview = gr.Textbox(
+                label="Speaker examples",
+                interactive=False,
+                lines=6,
+            )
+            refresh_speakers.click(
+                fn=load_registry_speakers,
+                inputs=recording,
+                outputs=[registry_speaker, speaker_preview],
+            )
+
+            display_name = gr.Textbox(
+                label="Name for confirmed speaker",
+                placeholder="e.g. Alex",
+            )
+            save_speaker = gr.Button("Save confirmed speaker to registry", variant="primary")
+            registry_status = gr.Textbox(
+                label="Registry status",
+                interactive=False,
+                lines=7,
+            )
+            save_speaker.click(
+                fn=enroll_registry_speaker,
+                inputs=[recording, registry_speaker, display_name],
+                outputs=registry_status,
+                concurrency_limit=1,
+            )
+
+            with gr.Row():
+                recognize = gr.Button("Recognize known speakers in selected recording")
+                show_registry = gr.Button("Show registry")
+            recognition_status = gr.Textbox(
+                label="Recognition preview",
+                interactive=False,
+                lines=14,
+            )
+            recognize.click(
+                fn=recognize_registry_speakers,
+                inputs=recording,
+                outputs=recognition_status,
+                concurrency_limit=1,
+            )
+            show_registry.click(
+                fn=registry_overview,
+                outputs=recognition_status,
+            )
+
         with gr.Accordion("Speaker recognition benchmark (development)", open=False):
             gr.Markdown(
                 "Runs non-destructive speaker-embedding validation. "
-                "It does not name speakers or write to a speaker registry."
+                "It does not modify transcript outputs."
             )
             benchmark = gr.Button("Benchmark selected recording")
             benchmark_status = gr.Textbox(label="Single-recording benchmark", interactive=False, lines=10)
