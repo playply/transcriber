@@ -6,7 +6,8 @@ from pathlib import Path
 
 from exporters import export_transcript
 from pipeline import transcribe_recording
-from speaker_registry import apply_recognition, load_registry
+from speaker_registry import load_registry
+from speaker_resolution import apply_recognition
 
 SUPPORTED_EXTENSIONS = {".mp4", ".mp3", ".m4a", ".wav"}
 
