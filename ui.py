@@ -5,6 +5,7 @@ import os
 import secrets
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Iterator
 
@@ -13,6 +14,7 @@ import gradio as gr
 
 DRIVE_ROOT = Path(os.environ.get("TRANSCRIBER_DRIVE_ROOT", "/content/drive/MyDrive")).resolve()
 APP_PATH = Path(__file__).with_name("app.py").resolve()
+BENCHMARK_PATH = Path(__file__).with_name("speaker_benchmark.py").resolve()
 APP_PYTHON = os.environ.get("TRANSCRIBER_APP_PYTHON") or sys.executable
 SUPPORTED_EXTENSIONS = {".mp4", ".mp3", ".m4a", ".wav"}
 
@@ -121,6 +123,92 @@ def transcribe(selected: str | None) -> Iterator[tuple[str, str | None, str | No
     )
 
 
+def _fmt_score(value: object) -> str:
+    return "n/a" if value is None else f"{float(value):.3f}"
+
+
+def _benchmark_summary(report: dict) -> str:
+    same = report.get("same_speaker_similarity") or {}
+    different = report.get("different_speaker_similarity") or {}
+    holdout = report.get("closed_set_holdout") or {}
+    calibration = report.get("calibration") or {}
+    chunks = report.get("chunks_per_speaker") or {}
+
+    accuracy = holdout.get("accuracy")
+    accuracy_text = "n/a" if accuracy is None else f"{float(accuracy) * 100:.1f}%"
+    threshold = calibration.get("candidate_threshold")
+    threshold_text = _fmt_score(threshold)
+
+    return (
+        f"Embedding model: {report.get('embedding_model')}\n"
+        f"Chunks per speaker: {chunks}\n"
+        f"Same-speaker similarity: p10={_fmt_score(same.get('p10'))}, "
+        f"median={_fmt_score(same.get('median'))}\n"
+        f"Different-speaker similarity: p95={_fmt_score(different.get('p95'))}, "
+        f"max={_fmt_score(different.get('max'))}\n"
+        f"Conservative separation gap (same p10 - different p95): "
+        f"{_fmt_score(report.get('separation_gap_p10_vs_p95'))}\n"
+        f"Closed-set holdout accuracy: {accuracy_text} "
+        f"({holdout.get('correct', 0)}/{holdout.get('queries', 0)})\n"
+        f"Exploratory threshold: {threshold_text}\n\n"
+        "Automatic naming is still disabled. We will only standardize a threshold after "
+        "a second-recording validation with at least one recurring speaker."
+    )
+
+
+def benchmark_speakers(selected: str | None) -> Iterator[str]:
+    source = _resolve_source(selected)
+    transcript_path = source.with_name(f"{source.stem}_transcript.json")
+    if not transcript_path.is_file():
+        raise gr.Error("Transcribe this recording first; the canonical JSON is required.")
+
+    yield (
+        "Running speaker embedding benchmark. This uses the existing transcript to build "
+        "multiple speech chunks per diarized speaker and does not change the transcript or registry."
+    )
+
+    env = os.environ.copy()
+    with tempfile.NamedTemporaryFile(prefix="speaker-benchmark-", suffix=".json", delete=False) as tmp:
+        report_path = Path(tmp.name)
+
+    process = subprocess.Popen(
+        [
+            APP_PYTHON,
+            "-u",
+            str(BENCHMARK_PATH),
+            str(source),
+            "--output",
+            str(report_path),
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    last_lines: list[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="", flush=True)
+        last_lines.append(line.rstrip())
+        if len(last_lines) > 80:
+            del last_lines[:-80]
+
+    return_code = process.wait()
+    if return_code != 0:
+        report_path.unlink(missing_ok=True)
+        tail = "\n".join(last_lines[-20:])
+        raise gr.Error("Speaker benchmark failed. Last log lines:\n\n" + tail)
+
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    finally:
+        report_path.unlink(missing_ok=True)
+
+    yield _benchmark_summary(report)
+
+
 def build_ui() -> gr.Blocks:
     if not DRIVE_ROOT.exists():
         raise RuntimeError(f"Google Drive is not mounted: {DRIVE_ROOT}")
@@ -151,6 +239,20 @@ def build_ui() -> gr.Blocks:
             outputs=[status, json_output, txt_output, docx_output],
             concurrency_limit=1,
         )
+
+        with gr.Accordion("Speaker recognition benchmark (development)", open=False):
+            gr.Markdown(
+                "Runs a non-destructive embedding benchmark on an already-transcribed recording. "
+                "It does not name speakers or write to a speaker registry."
+            )
+            benchmark = gr.Button("Benchmark speaker embeddings")
+            benchmark_status = gr.Textbox(label="Benchmark result", interactive=False, lines=10)
+            benchmark.click(
+                fn=benchmark_speakers,
+                inputs=recording,
+                outputs=benchmark_status,
+                concurrency_limit=1,
+            )
 
     return demo
 
