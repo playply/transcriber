@@ -21,6 +21,8 @@ CROSS_BENCHMARK_PATH = Path(__file__).with_name("speaker_cross_benchmark.py").re
 REGISTRY_TOOL_PATH = Path(__file__).with_name("speaker_registry.py").resolve()
 CONFIRM_TOOL_PATH = Path(__file__).with_name("confirm_speaker.py").resolve()
 APP_PYTHON = os.environ.get("TRANSCRIBER_APP_PYTHON") or sys.executable
+GPU_AVAILABLE = os.environ.get("TRANSCRIBER_GPU_AVAILABLE", "1") == "1"
+REPO_HEAD = os.environ.get("TRANSCRIBER_REPO_HEAD", "unknown")
 REGISTRY_PATH = Path(
     os.environ.get(
         "TRANSCRIBER_REGISTRY_PATH",
@@ -126,7 +128,7 @@ def _load_canonical(source: Path) -> dict:
     json_path = source.with_name(f"{source.stem}_transcript.json")
     if not json_path.is_file():
         raise gr.Error(
-            "Transcribe this recording first; the canonical JSON is required."
+            "This recording has no canonical _transcript.json yet. Transcribe it when GPU is available."
         )
     return json.loads(json_path.read_text(encoding="utf-8"))
 
@@ -175,6 +177,13 @@ def _unknown_speakers_from_data(
         str(item.get("diarization_speaker")): item
         for item in (data.get("speaker_resolution") or {}).get("results") or []
     }
+    unknowns.sort(
+        key=lambda speaker: (
+            -int((resolution_results.get(speaker) or {}).get("chunks") or 0),
+            speaker,
+        )
+    )
+
     previews: dict[str, str] = {}
     for speaker in unknowns:
         example = _representative_segment(segments, speaker)
@@ -220,6 +229,11 @@ def _unknown_update(source: Path):
     )
 
 
+def load_existing_unknowns(selected: str | None):
+    source = _resolve_source(selected)
+    return _unknown_update(source)
+
+
 def _result_summary(json_path: Path) -> str:
     try:
         data = json.loads(json_path.read_text(encoding="utf-8"))
@@ -251,6 +265,12 @@ def _result_summary(json_path: Path) -> str:
 
 
 def transcribe(selected: str | None) -> Iterator[tuple]:
+    if not GPU_AVAILABLE:
+        raise gr.Error(
+            "GPU is unavailable in this Colab runtime. Use CPU maintenance mode for existing transcripts, "
+            "or start a GPU runtime later to transcribe a new recording."
+        )
+
     source = _resolve_source(selected)
     if not os.environ.get("HF_TOKEN"):
         raise gr.Error(
@@ -325,7 +345,7 @@ def confirm_unknown_speaker(
     unknowns, _ = _unknown_speakers_from_data(data)
     if diarization_speaker not in unknowns:
         raise gr.Error(
-            f"{diarization_speaker} is no longer unresolved. Refresh by retranscribing or choose another speaker."
+            f"{diarization_speaker} is no longer unresolved. Reload unknown speakers and choose another speaker."
         )
 
     report = _run_json_tool(
@@ -343,11 +363,20 @@ def confirm_unknown_speaker(
     )
     outputs = report.get("outputs") or {}
     unknown_dropdown, preview, remaining_status = _unknown_update(source)
+    if report.get("voice_reference_saved", True):
+        voice_status = (
+            f"Voice reference saved: {report.get('chunks_added')} usable chunk(s)."
+        )
+    else:
+        voice_status = (
+            "Name saved, but no voice reference was added because this recording has too little usable speech. "
+            "The identity will not be auto-matched until a later recording provides enough speech."
+        )
     return (
         (
             f"Saved {diarization_speaker} as {report.get('display_name')} "
             f"({report.get('speaker_id')}).\n"
-            f"Reference chunks added: {report.get('chunks_added')}.\n"
+            f"{voice_status}\n"
             f"Updated transcript segments: {report.get('updated_segments')}.\n"
             f"{remaining_status}\n"
             "JSON/TXT/DOCX regenerated without retranscription."
@@ -657,11 +686,13 @@ def build_ui() -> gr.Blocks:
     if not DRIVE_ROOT.exists():
         raise RuntimeError(f"Google Drive is not mounted: {DRIVE_ROOT}")
 
+    runtime_mode = "GPU transcription mode" if GPU_AVAILABLE else "CPU maintenance mode"
     with gr.Blocks(title="Interview Transcriber") as demo:
         gr.Markdown(
             "# Interview Transcriber\n"
             "Choose an existing recording from Google Drive. "
-            "Known voices are resolved automatically; only unknown speakers need names."
+            "Known voices are resolved automatically; only unknown speakers need names.\n\n"
+            f"**Runtime:** {runtime_mode} · **Build:** `{REPO_HEAD}`"
         )
         recording = gr.FileExplorer(
             root_dir=str(DRIVE_ROOT),
@@ -670,7 +701,11 @@ def build_ui() -> gr.Blocks:
             label="Recording on Google Drive",
             height=420,
         )
-        start = gr.Button("Transcribe", variant="primary")
+        start = gr.Button(
+            "Transcribe" if GPU_AVAILABLE else "Transcribe — GPU unavailable",
+            variant="primary",
+            interactive=GPU_AVAILABLE,
+        )
         status = gr.Textbox(label="Status", interactive=False, lines=5)
         with gr.Row():
             json_output = gr.File(label="JSON")
@@ -680,8 +715,11 @@ def build_ui() -> gr.Blocks:
         with gr.Accordion("Unknown speakers — name once", open=True):
             gr.Markdown(
                 "After transcription this section contains only unresolved speaker IDs. "
-                "Choose one, verify the snippet, enter the name, and save it. "
-                "The registry and transcript files are updated without retranscription."
+                "In CPU maintenance mode, use the load button to read them from an existing transcript. "
+                "Choose one, verify the snippet, enter the name, and save it."
+            )
+            load_unknowns = gr.Button(
+                "Load unknown speakers from existing transcript"
             )
             unknown_speaker = gr.Dropdown(
                 choices=[],
@@ -778,6 +816,11 @@ def build_ui() -> gr.Blocks:
                 unknown_status,
             ],
             concurrency_limit=1,
+        )
+        load_unknowns.click(
+            fn=load_existing_unknowns,
+            inputs=recording,
+            outputs=[unknown_speaker, unknown_preview, unknown_status],
         )
         unknown_speaker.change(
             fn=unknown_speaker_preview,
