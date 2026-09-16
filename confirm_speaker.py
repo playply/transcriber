@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from exporters import write_canonical_transcript
-from speaker_registry import enroll_speaker
+from speaker_registry import enroll_speaker, load_registry, save_registry
 
 
 def _now() -> str:
@@ -16,6 +17,70 @@ def _now() -> str:
 
 def _transcript_path(source: Path) -> Path:
     return source.with_name(f"{source.stem}_transcript.json")
+
+
+def _find_identity_by_name(registry: dict[str, Any], display_name: str) -> dict[str, Any] | None:
+    wanted = display_name.strip().casefold()
+    for identity in registry.get("speakers") or []:
+        if str(identity.get("display_name") or "").strip().casefold() == wanted:
+            return identity
+    return None
+
+
+def _save_metadata_only_identity(
+    source: Path,
+    diarization_speaker: str,
+    display_name: str,
+    registry_path: Path,
+    enrollment_error: str,
+) -> dict[str, Any]:
+    """Persist a user-confirmed identity without voice embeddings.
+
+    This is used only when there is not enough usable speech to build a safe
+    embedding reference. Such identities stay out of automatic voice matching
+    until a later confirmation supplies sufficient speech.
+    """
+    registry = load_registry(registry_path)
+    identity = _find_identity_by_name(registry, display_name)
+    created = identity is None
+    if identity is None:
+        identity = {
+            "speaker_id": "spk_" + uuid.uuid4().hex[:12],
+            "display_name": display_name,
+            "embeddings": [],
+            "provenance": [],
+            "created_at": _now(),
+            "updated_at": _now(),
+        }
+        registry.setdefault("speakers", []).append(identity)
+
+    identity["display_name"] = display_name
+    identity["updated_at"] = _now()
+    identity.setdefault("provenance", []).append(
+        {
+            "source": str(source),
+            "transcript": str(_transcript_path(source)),
+            "diarization_speaker": diarization_speaker,
+            "chunks": 0,
+            "added_at": _now(),
+            "quality": "insufficient_usable_speech",
+            "note": enrollment_error,
+        }
+    )
+    save_registry(registry_path, registry)
+
+    return {
+        "registry": str(registry_path.expanduser().resolve()),
+        "created": created,
+        "speaker_id": identity["speaker_id"],
+        "display_name": identity["display_name"],
+        "source": str(source),
+        "diarization_speaker": diarization_speaker,
+        "chunks_added": 0,
+        "reference_embeddings": len(identity.get("embeddings") or []),
+        "voice_reference_saved": False,
+        "voice_reference_note": enrollment_error,
+    }
 
 
 def confirm_speaker(
@@ -32,12 +97,26 @@ def confirm_speaker(
     if not display_name:
         raise ValueError("Display name must not be empty.")
 
-    enrollment = enroll_speaker(
-        source,
-        diarization_speaker,
-        display_name,
-        registry_path,
-    )
+    try:
+        enrollment = enroll_speaker(
+            source,
+            diarization_speaker,
+            display_name,
+            registry_path,
+        )
+        enrollment["voice_reference_saved"] = True
+        enrollment["voice_reference_note"] = None
+    except RuntimeError as exc:
+        message = str(exc)
+        if "does not have enough usable speech" not in message:
+            raise
+        enrollment = _save_metadata_only_identity(
+            source,
+            diarization_speaker,
+            display_name,
+            registry_path,
+            message,
+        )
 
     transcript_path = _transcript_path(source)
     transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
@@ -69,6 +148,7 @@ def confirm_speaker(
             "unique_best": True,
             "chunks": enrollment.get("chunks_added"),
             "reason": "user_confirmed",
+            "voice_reference_saved": enrollment.get("voice_reference_saved", True),
         }
     )
     resolution["resolved_at"] = _now()
