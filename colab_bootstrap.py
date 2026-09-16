@@ -9,7 +9,7 @@ from pathlib import Path
 
 from google.colab import drive, userdata
 
-LAUNCHER_BUILD = "bootstrap-v2"
+LAUNCHER_BUILD = "bootstrap-v3"
 REPO_URL = "https://github.com/playply/transcriber.git"
 REPO_DIR = Path("/content/transcriber")
 DRIVE_MOUNT = Path("/content/drive")
@@ -187,7 +187,7 @@ if ui_check.returncode != 0:
     raise RuntimeError("Gradio import check failed in the isolated UI environment.")
 print(f"✓ UI environment ready (Gradio {ui_check.stdout.strip()})", flush=True)
 
-# 7) Launch the temporary authenticated Gradio UI.
+# 7) Launch the temporary authenticated Gradio UI and explicitly stream child output.
 env = os.environ.copy()
 env["HF_TOKEN"] = hf_token
 env["TRANSCRIBER_DRIVE_ROOT"] = "/content/drive/MyDrive"
@@ -197,8 +197,21 @@ env["PYTHONUNBUFFERED"] = "1"
 
 print("\nStarting Interview Transcriber...", flush=True)
 print("Keep this Colab cell running while you use the web UI.", flush=True)
-subprocess.run(
+print("Streaming UI startup log below:", flush=True)
+
+ui_process = subprocess.Popen(
     [str(ui_python), "-u", str(REPO_DIR / "ui.py")],
     env=env,
-    check=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    bufsize=1,
 )
+
+assert ui_process.stdout is not None
+for line in ui_process.stdout:
+    print(line, end="", flush=True)
+
+ui_return_code = ui_process.wait()
+if ui_return_code != 0:
+    raise RuntimeError(f"Gradio UI process exited with status {ui_return_code}.")
