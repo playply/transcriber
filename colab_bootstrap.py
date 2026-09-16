@@ -5,15 +5,51 @@ import secrets
 import shutil
 import subprocess
 import sys
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from google.colab import drive, userdata
 
-LAUNCHER_BUILD = "bootstrap-v3"
+LAUNCHER_BUILD = "bootstrap-v4"
 REPO_URL = "https://github.com/playply/transcriber.git"
 REPO_DIR = Path("/content/transcriber")
 DRIVE_MOUNT = Path("/content/drive")
 UI_VENV = Path("/content/transcriber-ui-venv-6.27.0")
+CORE_VERSIONS = {
+    "whisperx": "3.8.5",
+    "transformers": "4.57.6",
+    "python-docx": "1.2.0",
+}
+GRADIO_VERSION = "6.27.0"
+
+
+def _installed_version(package_name: str) -> str | None:
+    try:
+        return version(package_name)
+    except PackageNotFoundError:
+        return None
+
+
+def _versions_match(expected: dict[str, str]) -> bool:
+    return all(_installed_version(name) == wanted for name, wanted in expected.items())
+
+
+def _run_streamed(command: list[str], *, env: dict[str, str] | None = None) -> None:
+    process = subprocess.Popen(
+        command,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="", flush=True)
+    return_code = process.wait()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, command)
+
 
 print(f"Interview Transcriber launcher: {LAUNCHER_BUILD}", flush=True)
 
@@ -79,28 +115,37 @@ repo_head = subprocess.run(
 ).stdout.strip()
 print(f"✓ Repository ready ({repo_head})", flush=True)
 
-# 5) Install only the tested transcription stack in the main Colab Python.
-print("Installing transcription dependencies...", flush=True)
-core_install = subprocess.run(
-    [
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "-r",
-        str(REPO_DIR / "requirements.txt"),
-        "python-docx",
-    ],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True,
-)
-if core_install.returncode != 0:
-    print(core_install.stdout)
-    raise RuntimeError(
-        "Transcription dependency installation failed. The complete pip output is shown above."
-    )
-print("✓ Transcription dependencies installed", flush=True)
+# 5) Install the tested transcription stack only when it is actually missing/mismatched.
+if _versions_match(CORE_VERSIONS):
+    print("✓ Transcription dependencies already satisfied", flush=True)
+else:
+    current = {name: _installed_version(name) for name in CORE_VERSIONS}
+    print(f"Installing transcription dependencies (current: {current})...", flush=True)
+    print("pip progress:", flush=True)
+    try:
+        _run_streamed(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "-r",
+                str(REPO_DIR / "requirements.txt"),
+                "python-docx==1.2.0",
+            ]
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "Transcription dependency installation failed. See the pip output above."
+        ) from exc
+
+    if not _versions_match(CORE_VERSIONS):
+        actual = {name: _installed_version(name) for name in CORE_VERSIONS}
+        raise RuntimeError(
+            f"Transcription dependency versions are still incorrect after installation: {actual}"
+        )
+    print("✓ Transcription dependencies installed", flush=True)
 
 # 6) Keep Gradio isolated from WhisperX/pyannote dependencies.
 ui_python = UI_VENV / "bin" / "python"
@@ -118,31 +163,15 @@ if not ui_env_ok:
         shutil.rmtree(UI_VENV)
 
     print("Creating isolated UI environment...", flush=True)
-    virtualenv_install = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "virtualenv"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    if virtualenv_install.returncode != 0:
-        print(virtualenv_install.stdout)
-        raise RuntimeError(
-            "Could not install virtualenv for the isolated UI environment. "
-            "The complete pip output is shown above."
+    try:
+        _run_streamed(
+            [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "virtualenv"]
         )
-
-    env_create = subprocess.run(
-        [sys.executable, "-m", "virtualenv", str(UI_VENV)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    if env_create.returncode != 0:
-        print(env_create.stdout)
+        _run_streamed([sys.executable, "-m", "virtualenv", str(UI_VENV)])
+    except subprocess.CalledProcessError as exc:
         raise RuntimeError(
-            "Could not create the isolated UI environment with virtualenv. "
-            "The complete output is shown above."
-        )
+            "Could not create the isolated UI environment. See the output above."
+        ) from exc
 
     ui_python = UI_VENV / "bin" / "python"
     pip_check = subprocess.run(
@@ -155,18 +184,38 @@ if not ui_env_ok:
         print(pip_check.stdout)
         raise RuntimeError("The isolated UI environment was created without a working pip.")
 
-print("Installing UI dependencies...", flush=True)
-ui_install = subprocess.run(
-    [str(ui_python), "-m", "pip", "install", "gradio==6.27.0"],
+ui_gradio_version = subprocess.run(
+    [
+        str(ui_python),
+        "-c",
+        "from importlib.metadata import version; print(version('gradio'))",
+    ],
     stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
+    stderr=subprocess.DEVNULL,
     text=True,
-)
-if ui_install.returncode != 0:
-    print(ui_install.stdout)
-    raise RuntimeError(
-        "Gradio installation failed. The complete pip output is shown above."
+).stdout.strip()
+
+if ui_gradio_version == GRADIO_VERSION:
+    print(f"✓ UI dependencies already satisfied (Gradio {GRADIO_VERSION})", flush=True)
+else:
+    print(
+        f"Installing UI dependencies (current Gradio: {ui_gradio_version or 'not installed'})...",
+        flush=True,
     )
+    print("pip progress:", flush=True)
+    try:
+        _run_streamed(
+            [
+                str(ui_python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                f"gradio=={GRADIO_VERSION}",
+            ]
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError("Gradio installation failed. See the pip output above.") from exc
 
 try:
     ui_check = subprocess.run(
@@ -185,6 +234,10 @@ except subprocess.TimeoutExpired as exc:
 if ui_check.returncode != 0:
     print(ui_check.stdout)
     raise RuntimeError("Gradio import check failed in the isolated UI environment.")
+if ui_check.stdout.strip() != GRADIO_VERSION:
+    raise RuntimeError(
+        f"Unexpected Gradio version in UI environment: {ui_check.stdout.strip()}"
+    )
 print(f"✓ UI environment ready (Gradio {ui_check.stdout.strip()})", flush=True)
 
 # 7) Launch the temporary authenticated Gradio UI and explicitly stream child output.
