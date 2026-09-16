@@ -31,9 +31,11 @@ Gradio UI and persistent speaker recognition are deliberately not implemented ye
 1. Open `colab_launcher.ipynb` in Google Colab.
 2. Select a T4 GPU runtime.
 3. Add `HF_TOKEN` to Colab Secrets and allow notebook access to it.
-4. Run the setup cells. Google Drive will be mounted at `/content/drive`.
-5. Set `SOURCE_PATH` to an existing `.mp4`, `.mp3`, `.m4a`, or `.wav` file in Drive.
-6. Run the transcription cell.
+4. Run the cells from top to bottom.
+5. The launcher clones or refreshes `main`, installs dependencies, verifies CUDA, mounts Drive, and loads the token without printing it.
+6. Change only `SOURCE_PATH` to an existing `.mp4`, `.mp3`, `.m4a`, or `.wav` recording in Drive.
+7. Run the transcription cell.
+8. Run the final verification cell; it fails if any DOCX/TXT/JSON output is missing.
 
 Example source:
 
@@ -49,6 +51,29 @@ meeting_transcript.txt
 meeting_transcript.json
 ```
 
+If imports fail immediately after package installation with a NumPy/import compatibility error, restart the Colab runtime once and rerun the notebook from the first cell. This recovery was needed in a previously observed Colab runtime transition.
+
+## What the baseline records
+
+The canonical JSON preserves:
+
+- source filename and path;
+- processing timestamp;
+- transcription language;
+- Whisper model name;
+- diarization model name;
+- installed versions of WhisperX, torch, pyannote.audio, and transformers;
+- detected diarization speaker IDs;
+- speaker count excluding `UNKNOWN`;
+- segment start/end timestamps;
+- original diarization speaker ID;
+- `resolved_name` placeholder;
+- text and word timestamps when available.
+
+## T4 memory behavior
+
+The pipeline releases the Whisper transcription model before alignment and releases the alignment model before diarization. This keeps the clean-room baseline leaner on a Colab T4 without changing the transcription stack.
+
 ## Local CLI shape
 
 The application entry point is intentionally simple:
@@ -61,7 +86,9 @@ python app.py /path/to/meeting.m4a
 
 ## Baseline notes
 
-The initial pins reflect the previously tested Colab setup (`whisperx==3.8.5`, `transformers==4.57.6`, `python-docx` for DOCX export). They are a clean-room starting point, not a permanent compatibility contract. Re-pin only after a fresh Colab run is verified end-to-end.
+The initial pins reflect the previously tested Colab setup (`whisperx==3.8.5`, `transformers==4.57.6`, `python-docx==1.2.0`). They remain a clean-room starting point, not a permanent compatibility contract. Re-pin only after a fresh Colab run is verified end-to-end.
+
+The repository can prepare and validate the launcher, but the actual clean-room acceptance run still has to be executed in a fresh Colab T4 runtime against a real Drive recording.
 
 ## Not in this milestone
 
