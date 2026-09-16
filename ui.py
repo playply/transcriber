@@ -16,8 +16,6 @@ DRIVE_ROOT = Path(
     os.environ.get("TRANSCRIBER_DRIVE_ROOT", "/content/drive/MyDrive")
 ).resolve()
 APP_PATH = Path(__file__).with_name("app.py").resolve()
-BENCHMARK_PATH = Path(__file__).with_name("speaker_benchmark.py").resolve()
-CROSS_BENCHMARK_PATH = Path(__file__).with_name("speaker_cross_benchmark.py").resolve()
 REGISTRY_TOOL_PATH = Path(__file__).with_name("speaker_registry.py").resolve()
 CONFIRM_TOOL_PATH = Path(__file__).with_name("confirm_speaker.py").resolve()
 APP_PYTHON = os.environ.get("TRANSCRIBER_APP_PYTHON") or sys.executable
@@ -40,26 +38,19 @@ SUPPORTED_EXTENSIONS = {".mp4", ".mp3", ".m4a", ".wav"}
 def _resolve_source(selected: str | None) -> Path:
     if not selected:
         raise gr.Error("Choose a recording from Google Drive first.")
-
     source = Path(selected)
     if not source.is_absolute():
         source = DRIVE_ROOT / source
     source = source.resolve()
-
     try:
         source.relative_to(DRIVE_ROOT)
     except ValueError as exc:
-        raise gr.Error(
-            "The selected file must be inside the mounted Google Drive."
-        ) from exc
-
+        raise gr.Error("The selected file must be inside the mounted Google Drive.") from exc
     if not source.is_file():
         raise gr.Error(f"File not found: {source}")
     if source.suffix.lower() not in SUPPORTED_EXTENSIONS:
         supported = ", ".join(sorted(SUPPORTED_EXTENSIONS))
-        raise gr.Error(
-            f"Unsupported format {source.suffix}. Supported: {supported}"
-        )
+        raise gr.Error(f"Unsupported format {source.suffix}. Supported: {supported}")
     return source
 
 
@@ -70,10 +61,6 @@ def _output_paths(source: Path) -> tuple[Path, Path, Path]:
         source.with_name(f"{stem}_transcript.txt"),
         source.with_name(f"{stem}_transcript.docx"),
     )
-
-
-def _fmt_score(value: object) -> str:
-    return "n/a" if value is None else f"{float(value):.3f}"
 
 
 def _format_time(seconds: object) -> str:
@@ -101,7 +88,6 @@ def _run_process(command: list[str], error_prefix: str) -> None:
         last_lines.append(line.rstrip())
         if len(last_lines) > 80:
             del last_lines[:-80]
-
     return_code = process.wait()
     if return_code != 0:
         tail = "\n".join(last_lines[-20:])
@@ -113,12 +99,8 @@ def _run_json_tool(command: list[str], error_prefix: str) -> dict:
         prefix="transcriber-tool-", suffix=".json", delete=False
     ) as tmp:
         report_path = Path(tmp.name)
-
     try:
-        _run_process(
-            [*command, "--output", str(report_path)],
-            error_prefix,
-        )
+        _run_process([*command, "--output", str(report_path)], error_prefix)
         return json.loads(report_path.read_text(encoding="utf-8"))
     finally:
         report_path.unlink(missing_ok=True)
@@ -128,15 +110,13 @@ def _load_canonical(source: Path) -> dict:
     json_path = source.with_name(f"{source.stem}_transcript.json")
     if not json_path.is_file():
         raise gr.Error(
-            "This recording has no canonical _transcript.json yet. Transcribe it when GPU is available."
+            "This recording has no canonical _transcript.json yet. "
+            "Transcribe it when GPU is available."
         )
     return json.loads(json_path.read_text(encoding="utf-8"))
 
 
-def _representative_segment(
-    segments: list[dict],
-    speaker: str,
-) -> dict:
+def _representative_segment(segments: list[dict], speaker: str) -> dict:
     candidates = [
         segment
         for segment in segments
@@ -152,16 +132,13 @@ def _representative_segment(
     )
 
 
-def _unknown_speakers_from_data(
-    data: dict,
-) -> tuple[list[str], dict[str, str]]:
+def _unknown_speakers_from_data(data: dict) -> tuple[list[str], dict[str, str]]:
     segments = data.get("segments") or []
     concrete = sorted(
         {
             str(segment.get("speaker"))
             for segment in segments
-            if segment.get("speaker")
-            and segment.get("speaker") != "UNKNOWN"
+            if segment.get("speaker") and segment.get("speaker") != "UNKNOWN"
         }
     )
     resolved = {
@@ -172,7 +149,6 @@ def _unknown_speakers_from_data(
         and str(segment.get("resolved_name") or "").strip()
     }
     unknowns = [speaker for speaker in concrete if speaker not in resolved]
-
     resolution_results = {
         str(item.get("diarization_speaker")): item
         for item in (data.get("speaker_resolution") or {}).get("results") or []
@@ -211,107 +187,141 @@ def _unknown_update(source: Path):
     unknowns, previews = _unknown_speakers_from_data(data)
     selected = unknowns[0] if unknowns else None
     preview = previews.get(selected, "") if selected else ""
-    if unknowns:
-        status = (
-            f"Unknown speakers needing a name: {len(unknowns)} "
-            f"({', '.join(unknowns)})."
-        )
-    else:
-        status = "No unresolved diarization speakers need a name."
+    status = (
+        f"Unknown speakers needing a name: {len(unknowns)} ({', '.join(unknowns)})."
+        if unknowns
+        else "No unresolved diarization speakers need a name."
+    )
     return (
-        gr.Dropdown(
-            choices=unknowns,
-            value=selected,
-            label="Unknown speaker",
-        ),
+        gr.Dropdown(choices=unknowns, value=selected, label="Unknown speaker"),
         preview,
         status,
     )
 
 
-def load_existing_unknowns(selected: str | None):
+def _registry_data() -> dict:
+    if not REGISTRY_PATH.is_file():
+        return {"speakers": []}
+    return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+
+
+def _registry_choices() -> list[tuple[str, str]]:
+    identities = _registry_data().get("speakers") or []
+    choices: list[tuple[str, str]] = []
+    for identity in sorted(
+        identities,
+        key=lambda item: (
+            str(item.get("display_name") or "").casefold(),
+            str(item.get("speaker_id") or ""),
+        ),
+    ):
+        speaker_id = str(identity.get("speaker_id") or "").strip()
+        name = str(identity.get("display_name") or "").strip()
+        if speaker_id and name:
+            refs = len(identity.get("embeddings") or [])
+            choices.append((f"{name} · {speaker_id} · {refs} voice refs", speaker_id))
+    return choices
+
+
+def _registry_name(speaker_id: str | None) -> str:
+    if not speaker_id:
+        return ""
+    for identity in _registry_data().get("speakers") or []:
+        if str(identity.get("speaker_id") or "") == speaker_id:
+            return str(identity.get("display_name") or "")
+    return ""
+
+
+def load_existing_transcript(selected: str | None):
     source = _resolve_source(selected)
-    return _unknown_update(source)
+    json_path, txt_path, docx_path = _output_paths(source)
+    data = _load_canonical(source)
+    unknown_dropdown, preview, unknown_status = _unknown_update(source)
+    missing = [str(path) for path in (txt_path, docx_path) if not path.is_file()]
+    if missing:
+        raise gr.Error("Expected transcript output files are missing: " + ", ".join(missing))
+    return (
+        _result_summary(data),
+        str(json_path),
+        str(txt_path),
+        str(docx_path),
+        unknown_dropdown,
+        preview,
+        unknown_status,
+        gr.Dropdown(
+            choices=_registry_choices(),
+            value=None,
+            label="Existing person (optional)",
+        ),
+        "",
+    )
 
 
-def _result_summary(json_path: Path) -> str:
-    try:
-        data = json.loads(json_path.read_text(encoding="utf-8"))
-    except Exception:
-        return "Transcription complete."
-
-    bits = ["Transcription complete."]
+def _result_summary(data: dict) -> str:
+    bits = ["Transcript ready."]
     if data.get("speaker_count") is not None:
         bits.append(f"Detected speakers: {data['speaker_count']}.")
-    speakers = data.get("detected_speakers") or []
-    if speakers:
-        bits.append("IDs: " + ", ".join(map(str, speakers)) + ".")
-    segment_count = len(data.get("segments") or [])
-    if segment_count:
-        bits.append(f"Segments: {segment_count}.")
+    segments = data.get("segments") or []
+    if segments:
+        bits.append(f"Segments: {len(segments)}.")
     unknowns, _ = _unknown_speakers_from_data(data)
     if unknowns:
-        bits.append(
-            "Unknown speakers needing confirmation: "
-            + ", ".join(unknowns)
-            + "."
-        )
+        bits.append("Unknown speakers: " + ", ".join(unknowns) + ".")
     else:
-        bits.append("No unresolved diarization speaker IDs remain.")
-    bits.append(
-        "JSON, TXT and DOCX were saved beside the source recording in Google Drive."
-    )
+        bits.append("All diarization speakers are resolved.")
     return " ".join(bits)
 
 
 def transcribe(selected: str | None) -> Iterator[tuple]:
     if not GPU_AVAILABLE:
         raise gr.Error(
-            "GPU is unavailable in this Colab runtime. Use CPU maintenance mode for existing transcripts, "
-            "or start a GPU runtime later to transcribe a new recording."
+            "GPU is unavailable in this Colab runtime. Use 'Load existing transcript' "
+            "for maintenance, or start a GPU runtime later to transcribe a new recording."
         )
-
     source = _resolve_source(selected)
     if not os.environ.get("HF_TOKEN"):
-        raise gr.Error(
-            "HF_TOKEN is not available. Restart the launcher and check Colab Secrets."
-        )
+        raise gr.Error("HF_TOKEN is not available. Restart the launcher and check Colab Secrets.")
 
     yield (
-        "Processing. The first run can take longer while WhisperX/pyannote models are downloaded...",
+        "Processing...",
         None,
         None,
         None,
         gr.Dropdown(choices=[], value=None, label="Unknown speaker"),
         "",
         "Unknown speakers will appear here after transcription.",
+        gr.Dropdown(
+            choices=_registry_choices(),
+            value=None,
+            label="Existing person (optional)",
+        ),
+        "",
     )
-    _run_process(
-        [APP_PYTHON, "-u", str(APP_PATH), str(source)],
-        "Transcription failed",
-    )
+    _run_process([APP_PYTHON, "-u", str(APP_PATH), str(source)], "Transcription failed")
 
     json_path, txt_path, docx_path = _output_paths(source)
-    missing = [
-        str(path)
-        for path in (json_path, txt_path, docx_path)
-        if not path.exists()
-    ]
+    missing = [str(path) for path in (json_path, txt_path, docx_path) if not path.exists()]
     if missing:
         raise gr.Error(
-            "Pipeline finished but expected output files are missing: "
-            + ", ".join(missing)
+            "Pipeline finished but expected output files are missing: " + ", ".join(missing)
         )
 
-    unknown_dropdown, unknown_preview, unknown_status = _unknown_update(source)
+    data = _load_canonical(source)
+    unknown_dropdown, preview, unknown_status = _unknown_update(source)
     yield (
-        _result_summary(json_path),
+        _result_summary(data),
         str(json_path),
         str(txt_path),
         str(docx_path),
         unknown_dropdown,
-        unknown_preview,
+        preview,
         unknown_status,
+        gr.Dropdown(
+            choices=_registry_choices(),
+            value=None,
+            label="Existing person (optional)",
+        ),
+        "",
     )
 
 
@@ -329,53 +339,75 @@ def unknown_speaker_preview(
     return previews.get(diarization_speaker, "")
 
 
+def existing_identity_selected(speaker_id: str | None) -> str:
+    if not speaker_id:
+        return ""
+    name = _registry_name(speaker_id)
+    return (
+        f"Will link this diarization speaker to existing identity: {name} ({speaker_id}). "
+        "The New person name field is ignored while an existing person is selected."
+    )
+
+
 def confirm_unknown_speaker(
     selected: str | None,
     diarization_speaker: str | None,
+    existing_speaker_id: str | None,
     display_name: str | None,
 ):
     source = _resolve_source(selected)
     if not diarization_speaker:
         raise gr.Error("Choose an unknown speaker first.")
+
+    existing_speaker_id = (existing_speaker_id or "").strip() or None
     name = (display_name or "").strip()
-    if not name:
-        raise gr.Error("Enter the speaker's name.")
+    if not existing_speaker_id and not name:
+        raise gr.Error("Choose an existing person, or enter a name for a new person.")
 
     data = _load_canonical(source)
     unknowns, _ = _unknown_speakers_from_data(data)
     if diarization_speaker not in unknowns:
         raise gr.Error(
-            f"{diarization_speaker} is no longer unresolved. Reload unknown speakers and choose another speaker."
+            f"{diarization_speaker} is no longer unresolved. Reload the transcript and choose another speaker."
         )
 
-    report = _run_json_tool(
-        [
-            APP_PYTHON,
-            "-u",
-            str(CONFIRM_TOOL_PATH),
-            str(source),
-            diarization_speaker,
-            name,
-            "--registry",
-            str(REGISTRY_PATH),
-        ],
-        "Could not confirm unknown speaker",
-    )
+    command = [
+        APP_PYTHON,
+        "-u",
+        str(CONFIRM_TOOL_PATH),
+        str(source),
+        diarization_speaker,
+        "--registry",
+        str(REGISTRY_PATH),
+    ]
+    if existing_speaker_id:
+        command.extend(["--existing-speaker-id", existing_speaker_id])
+    else:
+        command.extend(["--display-name", name])
+
+    report = _run_json_tool(command, "Could not confirm unknown speaker")
     outputs = report.get("outputs") or {}
     unknown_dropdown, preview, remaining_status = _unknown_update(source)
-    if report.get("voice_reference_saved", True):
+
+    if report.get("voice_reference_saved", False):
         voice_status = (
-            f"Voice reference saved: {report.get('chunks_added')} usable chunk(s)."
+            f"Voice reference saved: {report.get('chunks_added')} usable chunk(s); "
+            f"identity now has {report.get('reference_embeddings')} stored reference embedding(s)."
         )
     else:
         voice_status = (
-            "Name saved, but no voice reference was added because this recording has too little usable speech. "
-            "The identity will not be auto-matched until a later recording provides enough speech."
+            "No voice reference was added because this diarization speaker has too little usable speech. "
+            "The confirmed identity/name is still stored and the transcript is updated."
         )
+
+    identity_action = (
+        "Linked to existing identity"
+        if report.get("linked_existing")
+        else "Created new identity"
+    )
     return (
         (
-            f"Saved {diarization_speaker} as {report.get('display_name')} "
-            f"({report.get('speaker_id')}).\n"
+            f"{identity_action}: {report.get('display_name')} ({report.get('speaker_id')}).\n"
             f"{voice_status}\n"
             f"Updated transcript segments: {report.get('updated_segments')}.\n"
             f"{remaining_status}\n"
@@ -386,300 +418,37 @@ def confirm_unknown_speaker(
         outputs.get("docx"),
         unknown_dropdown,
         preview,
-        "",
-    )
-
-
-def _transcript_speaker_info(source: Path) -> tuple[list[str], str]:
-    data = _load_canonical(source)
-    segments = data.get("segments") or []
-    speakers = sorted(
-        {
-            str(segment.get("speaker"))
-            for segment in segments
-            if segment.get("speaker")
-            and segment.get("speaker") != "UNKNOWN"
-        }
-    )
-    lines: list[str] = []
-    for speaker in speakers:
-        example = _representative_segment(segments, speaker)
-        text = str(example.get("text") or "").replace("\n", " ").strip()
-        if len(text) > 150:
-            text = text[:147] + "..."
-        lines.append(
-            f"{speaker}: {_format_time(example.get('start'))} — "
-            f"{text or '[no text]'}"
-        )
-    return speakers, "\n".join(lines)
-
-
-def load_registry_speakers(selected: str | None):
-    source = _resolve_source(selected)
-    speakers, preview = _transcript_speaker_info(source)
-    return (
         gr.Dropdown(
-            choices=speakers,
-            value=speakers[0] if speakers else None,
-            label="Confirmed speaker in selected recording",
+            choices=_registry_choices(),
+            value=None,
+            label="Existing person (optional)",
         ),
-        preview,
-    )
-
-
-def enroll_registry_speaker(
-    selected: str | None,
-    diarization_speaker: str | None,
-    display_name: str | None,
-) -> str:
-    source = _resolve_source(selected)
-    if not diarization_speaker:
-        raise gr.Error("Load speakers and choose the speaker to save.")
-    name = (display_name or "").strip()
-    if not name:
-        raise gr.Error("Enter a name for this speaker.")
-
-    report = _run_json_tool(
-        [
-            APP_PYTHON,
-            "-u",
-            str(REGISTRY_TOOL_PATH),
-            "enroll",
-            str(source),
-            diarization_speaker,
-            name,
-            "--registry",
-            str(REGISTRY_PATH),
-        ],
-        "Could not save speaker to registry",
-    )
-    action = "Created" if report.get("created") else "Updated"
-    return (
-        f"{action} identity: {report.get('display_name')} "
-        f"({report.get('speaker_id')})\n"
-        f"Source speaker: {report.get('diarization_speaker')}\n"
-        f"Reference chunks added: {report.get('chunks_added')}\n"
-        f"Stored reference embeddings: {report.get('reference_embeddings')}\n"
-        f"Registry: {report.get('registry')}"
-    )
-
-
-def _recognition_summary(report: dict, *, applied: bool) -> str:
-    thresholds = report.get("thresholds") or {}
-    lines = [
-        f"Registry: {report.get('registry')}",
-        f"Known identities: {report.get('known_identity_count')}",
-        "Thresholds: "
-        f"similarity>={thresholds.get('similarity')}, "
-        f"margin>={thresholds.get('margin')}, "
-        f"min_chunks={thresholds.get('min_chunks')}",
         "",
-    ]
-    for item in report.get("results") or []:
-        speaker = item.get("diarization_speaker")
-        if item.get("status") == "KNOWN":
-            lines.append(
-                f"{speaker} -> {item.get('resolved_name')} [KNOWN] "
-                f"score={_fmt_score(item.get('score'))}, "
-                f"margin={_fmt_score(item.get('margin'))}, "
-                f"unique_best={'yes' if item.get('unique_best') else 'no'}, "
-                f"chunks={item.get('chunks')}"
-            )
-        else:
-            best = item.get("matched_display_name")
-            best_text = f", best={best}" if best else ""
-            lines.append(
-                f"{speaker} -> UNKNOWN "
-                f"(score={_fmt_score(item.get('score'))}{best_text}, "
-                f"reason={item.get('reason')}, chunks={item.get('chunks')})"
-            )
-    if applied:
-        lines.extend(
-            [
-                "",
-                f"Applied resolved names. Updated segments: {report.get('updated_segments', 0)}.",
-                "JSON/TXT/DOCX regenerated beside the source recording.",
-            ]
-        )
-    return "\n".join(lines)
-
-
-def recognize_registry_speakers(selected: str | None) -> str:
-    source = _resolve_source(selected)
-    if not REGISTRY_PATH.is_file():
-        raise gr.Error(
-            "Speaker registry is empty. Save one confirmed speaker first."
-        )
-    report = _run_json_tool(
-        [
-            APP_PYTHON,
-            "-u",
-            str(REGISTRY_TOOL_PATH),
-            "recognize",
-            str(source),
-            "--registry",
-            str(REGISTRY_PATH),
-        ],
-        "Speaker recognition failed",
-    )
-    return _recognition_summary(report, applied=False)
-
-
-def apply_registry_names(selected: str | None):
-    source = _resolve_source(selected)
-    if not REGISTRY_PATH.is_file():
-        raise gr.Error(
-            "Speaker registry is empty. Save one confirmed speaker first."
-        )
-    report = _run_json_tool(
-        [
-            APP_PYTHON,
-            "-u",
-            str(REGISTRY_TOOL_PATH),
-            "apply",
-            str(source),
-            "--registry",
-            str(REGISTRY_PATH),
-        ],
-        "Could not apply speaker names",
-    )
-    outputs = report.get("outputs") or {}
-    return (
-        _recognition_summary(report, applied=True),
-        outputs.get("json"),
-        outputs.get("txt"),
-        outputs.get("docx"),
+        "",
     )
 
 
 def registry_overview() -> str:
-    if not REGISTRY_PATH.is_file():
-        return (
-            "Registry is empty. It will be created at:\n"
-            f"{REGISTRY_PATH}"
-        )
-    report = _run_json_tool(
-        [
-            APP_PYTHON,
-            "-u",
-            str(REGISTRY_TOOL_PATH),
-            "list",
-            "--registry",
-            str(REGISTRY_PATH),
-        ],
-        "Could not read speaker registry",
-    )
-    lines = [
-        f"Registry: {report.get('registry')}",
-        f"Known identities: {report.get('known_identity_count')}",
-    ]
-    for identity in report.get("speakers") or []:
+    identities = _registry_data().get("speakers") or []
+    lines = [f"Registry: {REGISTRY_PATH}", f"Known identities: {len(identities)}"]
+    for identity in sorted(
+        identities,
+        key=lambda item: str(item.get("display_name") or "").casefold(),
+    ):
         lines.append(
-            f"  {identity.get('display_name')} "
-            f"({identity.get('speaker_id')}): "
-            f"{identity.get('reference_embeddings')} reference embeddings, "
-            f"{identity.get('sources')} source(s)"
+            f"{identity.get('display_name')} ({identity.get('speaker_id')}): "
+            f"{len(identity.get('embeddings') or [])} voice refs, "
+            f"{len(identity.get('provenance') or [])} provenance record(s)"
         )
     return "\n".join(lines)
 
 
-def _benchmark_summary(report: dict) -> str:
-    same = report.get("same_speaker_similarity") or {}
-    different = report.get("different_speaker_similarity") or {}
-    holdout = report.get("closed_set_holdout") or {}
-    calibration = report.get("calibration") or {}
-    accuracy = holdout.get("accuracy")
-    accuracy_text = (
-        "n/a" if accuracy is None else f"{float(accuracy) * 100:.1f}%"
+def refresh_existing_people():
+    return gr.Dropdown(
+        choices=_registry_choices(),
+        value=None,
+        label="Existing person (optional)",
     )
-    return (
-        f"Embedding model: {report.get('embedding_model')}\n"
-        f"Chunks per speaker: {report.get('chunks_per_speaker') or {}}\n"
-        f"Same-speaker similarity: p10={_fmt_score(same.get('p10'))}, "
-        f"median={_fmt_score(same.get('median'))}\n"
-        f"Different-speaker similarity: p95={_fmt_score(different.get('p95'))}, "
-        f"max={_fmt_score(different.get('max'))}\n"
-        f"Conservative separation gap: "
-        f"{_fmt_score(report.get('separation_gap_p10_vs_p95'))}\n"
-        f"Closed-set holdout accuracy: {accuracy_text} "
-        f"({holdout.get('correct', 0)}/{holdout.get('queries', 0)})\n"
-        f"Exploratory threshold: "
-        f"{_fmt_score(calibration.get('candidate_threshold'))}"
-    )
-
-
-def benchmark_speakers(selected: str | None) -> str:
-    source = _resolve_source(selected)
-    _load_canonical(source)
-    report = _run_json_tool(
-        [
-            APP_PYTHON,
-            "-u",
-            str(BENCHMARK_PATH),
-            str(source),
-        ],
-        "Speaker benchmark failed",
-    )
-    return _benchmark_summary(report)
-
-
-def _cross_benchmark_summary(report: dict) -> str:
-    reference = report.get("reference") or {}
-    candidate = report.get("candidate") or {}
-    matrix = report.get("similarity_matrix") or {}
-    reference_speakers = sorted(
-        (reference.get("chunks_per_speaker") or {}).keys()
-    )
-    lines = [
-        f"Embedding model: {report.get('embedding_model')}",
-        f"Reference: {Path(str(reference.get('source', ''))).name}",
-        f"Second recording: {Path(str(candidate.get('source', ''))).name}",
-        "",
-        "Cross-recording cosine similarity matrix:",
-    ]
-    if reference_speakers and matrix:
-        header = "candidate \\ reference | " + " | ".join(reference_speakers)
-        lines.append(header)
-        lines.append("-" * len(header))
-        for candidate_speaker in sorted(matrix):
-            row = matrix[candidate_speaker]
-            scores = " | ".join(
-                _fmt_score(row.get(ref)) for ref in reference_speakers
-            )
-            lines.append(f"{candidate_speaker} | {scores}")
-    lines.extend(["", "Best matches (validation only):"])
-    for match in report.get("best_matches") or []:
-        lines.append(
-            f"  {match.get('candidate_speaker')} -> "
-            f"{match.get('reference_speaker')}: "
-            f"score={_fmt_score(match.get('score'))}, "
-            f"margin={_fmt_score(match.get('margin'))}, "
-            f"mutual_best={'yes' if match.get('mutual_best') else 'no'}"
-        )
-    return "\n".join(lines)
-
-
-def compare_recordings(
-    reference_selected: str | None,
-    candidate_selected: str | None,
-) -> str:
-    reference = _resolve_source(reference_selected)
-    candidate = _resolve_source(candidate_selected)
-    if reference == candidate:
-        raise gr.Error("Choose two different recordings.")
-    _load_canonical(reference)
-    _load_canonical(candidate)
-    report = _run_json_tool(
-        [
-            APP_PYTHON,
-            "-u",
-            str(CROSS_BENCHMARK_PATH),
-            str(reference),
-            str(candidate),
-        ],
-        "Cross-recording benchmark failed",
-    )
-    return _cross_benchmark_summary(report)
 
 
 def build_ui() -> gr.Blocks:
@@ -690,10 +459,11 @@ def build_ui() -> gr.Blocks:
     with gr.Blocks(title="Interview Transcriber") as demo:
         gr.Markdown(
             "# Interview Transcriber\n"
-            "Choose an existing recording from Google Drive. "
-            "Known voices are resolved automatically; only unknown speakers need names.\n\n"
+            "Choose a recording from Google Drive. Known voices are resolved automatically; "
+            "unknown diarization speakers can be linked to an existing person or saved as a new person.\n\n"
             f"**Runtime:** {runtime_mode} · **Build:** `{REPO_HEAD}`"
         )
+
         recording = gr.FileExplorer(
             root_dir=str(DRIVE_ROOT),
             glob="**/*",
@@ -701,12 +471,15 @@ def build_ui() -> gr.Blocks:
             label="Recording on Google Drive",
             height=420,
         )
-        start = gr.Button(
-            "Transcribe" if GPU_AVAILABLE else "Transcribe — GPU unavailable",
-            variant="primary",
-            interactive=GPU_AVAILABLE,
-        )
-        status = gr.Textbox(label="Status", interactive=False, lines=5)
+        with gr.Row():
+            start = gr.Button(
+                "Transcribe" if GPU_AVAILABLE else "Transcribe — GPU unavailable",
+                variant="primary",
+                interactive=GPU_AVAILABLE,
+            )
+            load_existing = gr.Button("Load existing transcript")
+
+        status = gr.Textbox(label="Status", interactive=False, lines=4)
         with gr.Row():
             json_output = gr.File(label="JSON")
             txt_output = gr.File(label="TXT")
@@ -714,28 +487,33 @@ def build_ui() -> gr.Blocks:
 
         with gr.Accordion("Unknown speakers — name once", open=True):
             gr.Markdown(
-                "After transcription this section contains only unresolved speaker IDs. "
-                "In CPU maintenance mode, use the load button to read them from an existing transcript. "
-                "Choose one, verify the snippet, enter the name, and save it."
+                "For each unresolved diarization ID, first decide whether it is someone already in the registry. "
+                "If yes, choose that person below. If not, leave Existing person blank and enter a new name."
             )
-            load_unknowns = gr.Button(
-                "Load unknown speakers from existing transcript"
-            )
-            unknown_speaker = gr.Dropdown(
-                choices=[],
-                label="Unknown speaker",
-            )
+            unknown_speaker = gr.Dropdown(choices=[], label="Unknown speaker")
             unknown_preview = gr.Textbox(
                 label="Representative snippet",
                 interactive=False,
                 lines=4,
             )
+            with gr.Row():
+                existing_identity = gr.Dropdown(
+                    choices=_registry_choices(),
+                    value=None,
+                    label="Existing person (optional)",
+                )
+                refresh_people = gr.Button("Refresh known people")
+            identity_hint = gr.Textbox(
+                label="Identity action",
+                interactive=False,
+                lines=2,
+            )
             unknown_name = gr.Textbox(
-                label="Name",
-                placeholder="Enter the speaker's name",
+                label="New person name",
+                placeholder="Required only when Existing person is blank",
             )
             confirm_unknown = gr.Button(
-                "Save name and update transcript",
+                "Link / create identity and update transcript",
                 variant="primary",
             )
             unknown_status = gr.Textbox(
@@ -744,92 +522,58 @@ def build_ui() -> gr.Blocks:
                 lines=7,
             )
 
-        with gr.Accordion("Speaker registry (advanced)", open=False):
-            refresh_speakers = gr.Button(
-                "Load all speakers from selected recording"
-            )
-            registry_speaker = gr.Dropdown(
-                choices=[],
-                label="Confirmed speaker in selected recording",
-            )
-            speaker_preview = gr.Textbox(
-                label="Speaker examples",
-                interactive=False,
-                lines=6,
-            )
-            display_name = gr.Textbox(
-                label="Name for confirmed speaker",
-                placeholder="e.g. Alex",
-            )
-            save_speaker = gr.Button("Save confirmed speaker to registry")
+        with gr.Accordion("Speaker registry", open=False):
+            show_registry = gr.Button("Show registry")
             registry_status = gr.Textbox(
-                label="Registry status",
+                label="Registry",
                 interactive=False,
-                lines=7,
-            )
-            with gr.Row():
-                recognize = gr.Button("Preview known-speaker matches")
-                apply_names = gr.Button(
-                    "Apply recognized names + regenerate files"
-                )
-                show_registry = gr.Button("Show registry")
-            recognition_status = gr.Textbox(
-                label="Speaker recognition",
-                interactive=False,
-                lines=16,
+                lines=12,
             )
 
-        with gr.Accordion(
-            "Speaker recognition benchmark (development)",
-            open=False,
-        ):
-            benchmark = gr.Button("Benchmark selected recording")
-            benchmark_status = gr.Textbox(
-                label="Single-recording benchmark",
-                interactive=False,
-                lines=10,
-            )
-            comparison_recording = gr.FileExplorer(
-                root_dir=str(DRIVE_ROOT),
-                glob="**/*",
-                file_count="single",
-                label="Second transcribed recording",
-                height=320,
-            )
-            compare = gr.Button("Compare speakers across recordings")
-            compare_status = gr.Textbox(
-                label="Cross-recording benchmark",
-                interactive=False,
-                lines=18,
-            )
-
+        start_outputs = [
+            status,
+            json_output,
+            txt_output,
+            docx_output,
+            unknown_speaker,
+            unknown_preview,
+            unknown_status,
+            existing_identity,
+            identity_hint,
+        ]
         start.click(
             fn=transcribe,
             inputs=recording,
-            outputs=[
-                status,
-                json_output,
-                txt_output,
-                docx_output,
-                unknown_speaker,
-                unknown_preview,
-                unknown_status,
-            ],
+            outputs=start_outputs,
             concurrency_limit=1,
         )
-        load_unknowns.click(
-            fn=load_existing_unknowns,
+        load_existing.click(
+            fn=load_existing_transcript,
             inputs=recording,
-            outputs=[unknown_speaker, unknown_preview, unknown_status],
+            outputs=start_outputs,
         )
         unknown_speaker.change(
             fn=unknown_speaker_preview,
             inputs=[recording, unknown_speaker],
             outputs=unknown_preview,
         )
+        existing_identity.change(
+            fn=existing_identity_selected,
+            inputs=existing_identity,
+            outputs=identity_hint,
+        )
+        refresh_people.click(
+            fn=refresh_existing_people,
+            outputs=existing_identity,
+        )
         confirm_unknown.click(
             fn=confirm_unknown_speaker,
-            inputs=[recording, unknown_speaker, unknown_name],
+            inputs=[
+                recording,
+                unknown_speaker,
+                existing_identity,
+                unknown_name,
+            ],
             outputs=[
                 unknown_status,
                 json_output,
@@ -837,73 +581,25 @@ def build_ui() -> gr.Blocks:
                 docx_output,
                 unknown_speaker,
                 unknown_preview,
+                existing_identity,
                 unknown_name,
+                identity_hint,
             ],
             concurrency_limit=1,
         )
-
-        refresh_speakers.click(
-            fn=load_registry_speakers,
-            inputs=recording,
-            outputs=[registry_speaker, speaker_preview],
-        )
-        save_speaker.click(
-            fn=enroll_registry_speaker,
-            inputs=[recording, registry_speaker, display_name],
-            outputs=registry_status,
-            concurrency_limit=1,
-        )
-        recognize.click(
-            fn=recognize_registry_speakers,
-            inputs=recording,
-            outputs=recognition_status,
-            concurrency_limit=1,
-        )
-        apply_names.click(
-            fn=apply_registry_names,
-            inputs=recording,
-            outputs=[
-                recognition_status,
-                json_output,
-                txt_output,
-                docx_output,
-            ],
-            concurrency_limit=1,
-        )
-        show_registry.click(
-            fn=registry_overview,
-            outputs=recognition_status,
-        )
-        benchmark.click(
-            fn=benchmark_speakers,
-            inputs=recording,
-            outputs=benchmark_status,
-            concurrency_limit=1,
-        )
-        compare.click(
-            fn=compare_recordings,
-            inputs=[recording, comparison_recording],
-            outputs=compare_status,
-            concurrency_limit=1,
-        )
+        show_registry.click(fn=registry_overview, outputs=registry_status)
 
     return demo
 
 
 def main() -> None:
     username = "transcriber"
-    password = (
-        os.environ.get("TRANSCRIBER_UI_PASSWORD")
-        or secrets.token_urlsafe(12)
-    )
+    password = os.environ.get("TRANSCRIBER_UI_PASSWORD") or secrets.token_urlsafe(12)
 
     print("\nInterview Transcriber UI credentials", flush=True)
     print(f"Username: {username}", flush=True)
     print(f"Password: {password}", flush=True)
-    print(
-        "Keep the temporary Gradio URL and password private.\n",
-        flush=True,
-    )
+    print("Keep the temporary Gradio URL and password private.\n", flush=True)
 
     demo = build_ui()
     demo.queue(default_concurrency_limit=1)
