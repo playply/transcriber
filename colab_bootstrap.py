@@ -10,7 +10,7 @@ from pathlib import Path
 
 from google.colab import drive, userdata
 
-LAUNCHER_BUILD = "bootstrap-v4"
+LAUNCHER_BUILD = "bootstrap-v5"
 REPO_URL = "https://github.com/playply/transcriber.git"
 REPO_DIR = Path("/content/transcriber")
 DRIVE_MOUNT = Path("/content/drive")
@@ -53,24 +53,25 @@ def _run_streamed(command: list[str], *, env: dict[str, str] | None = None) -> N
 
 print(f"Interview Transcriber launcher: {LAUNCHER_BUILD}", flush=True)
 
-# 1) Require an NVIDIA GPU before doing heavy setup.
+# 1) Detect GPU. Lack of GPU must not block maintenance work on existing transcripts.
 nvidia_smi = shutil.which("nvidia-smi")
-if not nvidia_smi:
-    raise RuntimeError(
-        "NVIDIA GPU is not attached to this Colab runtime. "
-        "Select Runtime → Change runtime type → T4 GPU, reconnect the runtime, then run START again."
+gpu_available = False
+if nvidia_smi:
+    gpu_check = subprocess.run(
+        [nvidia_smi],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
-gpu_check = subprocess.run(
-    [nvidia_smi],
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL,
-)
-if gpu_check.returncode != 0:
-    raise RuntimeError(
-        "NVIDIA GPU check failed. Select Runtime → Change runtime type → T4 GPU, "
-        "reconnect the runtime, then run START again."
+    gpu_available = gpu_check.returncode == 0
+
+if gpu_available:
+    print("✓ GPU available", flush=True)
+else:
+    print(
+        "⚠ GPU unavailable — starting CPU maintenance mode. "
+        "Existing transcript/registry operations remain available; new transcription requires a GPU.",
+        flush=True,
     )
-print("✓ GPU available", flush=True)
 
 # 2) Mount Google Drive.
 drive.mount(str(DRIVE_MOUNT))
@@ -246,9 +247,12 @@ env["HF_TOKEN"] = hf_token
 env["TRANSCRIBER_DRIVE_ROOT"] = "/content/drive/MyDrive"
 env["TRANSCRIBER_UI_PASSWORD"] = secrets.token_urlsafe(10)
 env["TRANSCRIBER_APP_PYTHON"] = sys.executable
+env["TRANSCRIBER_GPU_AVAILABLE"] = "1" if gpu_available else "0"
+env["TRANSCRIBER_REPO_HEAD"] = repo_head
 env["PYTHONUNBUFFERED"] = "1"
 
-print("\nStarting Interview Transcriber...", flush=True)
+mode = "GPU transcription mode" if gpu_available else "CPU maintenance mode"
+print(f"\nStarting Interview Transcriber ({mode})...", flush=True)
 print("Keep this Colab cell running while you use the web UI.", flush=True)
 print("Streaming UI startup log below:", flush=True)
 
