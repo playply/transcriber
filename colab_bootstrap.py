@@ -9,7 +9,7 @@ from pathlib import Path
 
 from google.colab import drive, userdata
 
-LAUNCHER_BUILD = "bootstrap-v1"
+LAUNCHER_BUILD = "bootstrap-v2"
 REPO_URL = "https://github.com/playply/transcriber.git"
 REPO_DIR = Path("/content/transcriber")
 DRIVE_MOUNT = Path("/content/drive")
@@ -103,11 +103,58 @@ if core_install.returncode != 0:
 print("✓ Transcription dependencies installed", flush=True)
 
 # 6) Keep Gradio isolated from WhisperX/pyannote dependencies.
-if not (UI_VENV / "bin" / "python").exists():
-    print("Creating isolated UI environment...", flush=True)
-    subprocess.run([sys.executable, "-m", "venv", str(UI_VENV)], check=True)
-
 ui_python = UI_VENV / "bin" / "python"
+ui_env_ok = False
+if ui_python.exists():
+    pip_check = subprocess.run(
+        [str(ui_python), "-m", "pip", "--version"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    ui_env_ok = pip_check.returncode == 0
+
+if not ui_env_ok:
+    if UI_VENV.exists():
+        shutil.rmtree(UI_VENV)
+
+    print("Creating isolated UI environment...", flush=True)
+    virtualenv_install = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "virtualenv"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if virtualenv_install.returncode != 0:
+        print(virtualenv_install.stdout)
+        raise RuntimeError(
+            "Could not install virtualenv for the isolated UI environment. "
+            "The complete pip output is shown above."
+        )
+
+    env_create = subprocess.run(
+        [sys.executable, "-m", "virtualenv", str(UI_VENV)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if env_create.returncode != 0:
+        print(env_create.stdout)
+        raise RuntimeError(
+            "Could not create the isolated UI environment with virtualenv. "
+            "The complete output is shown above."
+        )
+
+    ui_python = UI_VENV / "bin" / "python"
+    pip_check = subprocess.run(
+        [str(ui_python), "-m", "pip", "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if pip_check.returncode != 0:
+        print(pip_check.stdout)
+        raise RuntimeError("The isolated UI environment was created without a working pip.")
+
 print("Installing UI dependencies...", flush=True)
 ui_install = subprocess.run(
     [str(ui_python), "-m", "pip", "install", "gradio==6.27.0"],
