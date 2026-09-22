@@ -77,7 +77,8 @@ The launcher supports:
 - automatic Drive mount, secret loading, dependency preparation, and Gradio launch;
 - GPU transcription mode when T4 is available;
 - CPU maintenance mode for loading existing transcripts, re-recognition, registry operations, and manual identity confirmation;
-- temporary external UI access paths protected with session authentication;
+- temporary external UI access through a runtime magic-link that establishes an HttpOnly Secure session cookie without a separate username/password form;
+- automatic browser-open attempt from the START cell with a single-button fallback when popups are blocked;
 - a unified primary Process / Continue flow that opens an existing canonical transcript without retranscription and only starts WhisperX when no canonical transcript exists.
 
 Operational rule: release the Colab runtime immediately after a full transcription is safely persisted to Drive. Do not leave T4 idle.
@@ -115,7 +116,7 @@ Keep the MVP single-file. Do not add multi-file transcription, a persistent job 
 Automation work should remove operational steps around one selected recording. Priority order:
 
 1. unified state-aware Process / Continue flow;
-2. reduce friction opening/authenticating the temporary Gradio UI;
+2. validate the automatic magic-link Gradio entry path in a fresh Colab/browser session;
 3. automatic preflight after file selection and protection against accidental retranscription;
 4. better representative audio previews for meaningful unknown speakers;
 5. automatic finalization after the last meaningful unknown speaker is resolved;
