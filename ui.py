@@ -26,6 +26,7 @@ REGISTRY_PATH = Path(
     )
 ).resolve()
 SUPPORTED_EXTENSIONS = {".mp4", ".mp3", ".m4a", ".wav"}
+PROGRESS_PREFIX = "TRANSCRIBER_PROGRESS|"
 
 
 def _resolve_source(selected: str | None) -> Path:
@@ -83,6 +84,41 @@ def _run_process(command: list[str], error_prefix: str) -> None:
         print(line, end="", flush=True)
         last_lines.append(line.rstrip())
         last_lines = last_lines[-80:]
+    if process.wait() != 0:
+        raise gr.Error(
+            f"{error_prefix}. Last log lines:\n\n" + "\n".join(last_lines[-20:])
+        )
+
+
+def _run_process_progress(
+    command: list[str],
+    error_prefix: str,
+) -> Iterator[tuple[float, str, str]]:
+    process = subprocess.Popen(
+        command,
+        env=os.environ.copy(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    last_lines: list[str] = []
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="", flush=True)
+        stripped = line.rstrip()
+        last_lines.append(stripped)
+        last_lines = last_lines[-80:]
+        if not stripped.startswith(PROGRESS_PREFIX):
+            continue
+        parts = stripped.split("|", 3)
+        if len(parts) != 4:
+            continue
+        try:
+            percent = float(parts[1])
+        except ValueError:
+            continue
+        yield percent, parts[2], parts[3]
     if process.wait() != 0:
         raise gr.Error(
             f"{error_prefix}. Last log lines:\n\n" + "\n".join(last_lines[-20:])
@@ -411,6 +447,20 @@ def rerun_known_speaker_recognition(
     yield tuple(result)
 
 
+def _processing_result(status: str) -> tuple:
+    return (
+        status,
+        None,
+        None,
+        None,
+        gr.Dropdown(choices=[], value=None, label="Unknown speaker"),
+        "",
+        "Unknown speakers will appear here after transcription.",
+        _identity_dropdown(),
+        "",
+    )
+
+
 def transcribe(selected: str | None) -> Iterator[tuple]:
     if not GPU_AVAILABLE:
         raise gr.Error(
@@ -422,21 +472,17 @@ def transcribe(selected: str | None) -> Iterator[tuple]:
         raise gr.Error(
             "HF_TOKEN is not available. Restart the launcher and check Colab Secrets."
         )
-    yield (
-        "Processing...",
-        None,
-        None,
-        None,
-        gr.Dropdown(choices=[], value=None, label="Unknown speaker"),
-        "",
-        "Unknown speakers will appear here after transcription.",
-        _identity_dropdown(),
-        "",
-    )
-    _run_process(
+
+    yield _processing_result("0% — Starting transcription pipeline")
+    for percent, stage, detail in _run_process_progress(
         [APP_PYTHON, "-u", str(APP_PATH), str(source)],
         "Transcription failed",
-    )
+    ):
+        status = f"{percent:.0f}% — {stage}"
+        if detail:
+            status += f"\n{detail}"
+        yield _processing_result(status)
+
     json_path, txt_path, docx_path = _output_paths(source)
     missing = [
         str(path)
@@ -601,7 +647,7 @@ def build_ui() -> gr.Blocks:
             "transcript. It recalculates voice matching and regenerates JSON/TXT/DOCX "
             "without running WhisperX or diarization again."
         )
-        status = gr.Textbox(label="Status", interactive=False, lines=10)
+        status = gr.Textbox(label="Progress / status", interactive=False, lines=4)
         with gr.Row():
             json_output = gr.File(label="JSON")
             txt_output = gr.File(label="TXT")
