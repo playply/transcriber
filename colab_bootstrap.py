@@ -249,7 +249,8 @@ env["TRANSCRIBER_DRIVE_ROOT"] = "/content/drive/MyDrive"
 env["TRANSCRIBER_UI_PASSWORD"] = secrets.token_urlsafe(10)
 env["TRANSCRIBER_APP_PYTHON"] = sys.executable
 env["TRANSCRIBER_GPU_AVAILABLE"] = "1" if gpu_available else "0"
-env["TRANSCRIBER_REPO_HEAD"] = repo_head\nenv["TRANSCRIBER_COLAB_EMBEDDED"] = "1"
+env["TRANSCRIBER_REPO_HEAD"] = repo_head
+env["TRANSCRIBER_COLAB_EMBEDDED"] = "1"
 env["PYTHONUNBUFFERED"] = "1"
 
 mode = "GPU transcription mode" if gpu_available else "CPU maintenance mode"
