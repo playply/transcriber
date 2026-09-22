@@ -37,11 +37,12 @@ Multi-file processing, persistent job queues, and automatic Drive folder watchin
 2. Select a T4 GPU runtime for a new transcription. CPU mode is sufficient for maintenance on an existing transcript.
 3. Add `HF_TOKEN` to Colab Secrets and allow notebook access to it.
 4. Run the single **START INTERVIEW TRANSCRIBER** cell.
-5. The launcher refreshes the repository, mounts Drive, loads the token without printing it, prepares dependencies, launches the temporary Gradio UI, and attempts to open it automatically in a new browser tab.
-6. The UI uses a short-lived magic-link to establish a secure runtime session cookie, so there is no separate username/password form. If the browser blocks automatic tab opening, click the single **Open Interview Transcriber** button shown by the START cell.
+5. The launcher refreshes the repository, mounts Drive, loads the token without printing it, prepares dependencies, launches the temporary Gradio UI, and opens the authenticated **Colab proxy** URL automatically when possible.
+6. The UI uses a short-lived magic-link to establish a secure runtime session cookie, so there is no separate username/password form. If automatic opening is blocked, click **Open Interview Transcriber** in the START cell. A temporary Cloudflare URL is shown only as a fallback.
 7. In Gradio, choose one existing `.mp4`, `.mp3`, `.m4a`, or `.wav` recording from Drive.
 8. Press **Process / Continue**. If canonical JSON already exists, the app opens it without WhisperX retranscription; otherwise it starts the GPU transcription pipeline.
-9. Resolve any meaningful unknown speakers. JSON/TXT/DOCX are regenerated beside the source recording without retranscription.
+9. Watch the live progress bar/stage indicator while transcription runs.
+10. Resolve any meaningful unknown speakers. JSON/TXT/DOCX are regenerated beside the source recording without retranscription.
 
 Example source:
 
@@ -94,7 +95,7 @@ python app.py /path/to/meeting.m4a
 
 The initial pins reflect the previously tested Colab setup (`whisperx==3.8.5`, `transformers==4.57.6`, `python-docx==1.2.0`). They remain a clean-room starting point, not a permanent compatibility contract. Re-pin only after a fresh Colab run is verified end-to-end.
 
-The repository can prepare and validate the launcher, but the actual clean-room acceptance run still has to be executed in a fresh Colab T4 runtime against a real Drive recording.
+Fresh-Colab acceptance was completed on 2026-09-22 against real Drive recordings. Observed startup time to a usable Gradio UI was approximately **4 min 16 sec** from a fresh T4 runtime and approximately **15 sec** for a repeat START in the same prepared runtime. These are observed timings, not guarantees. The progress path was verified through intermediate stages up to 100%.
 
 ## Explicitly out of scope
 
