@@ -727,7 +727,7 @@ def main() -> None:
     demo = build_ui()
     demo.queue(default_concurrency_limit=1)
     demo.launch(
-        share=False,
+        share=os.environ.get("TRANSCRIBER_GRADIO_SHARE") == "1",
         server_name="127.0.0.1",
         server_port=int(os.environ.get("TRANSCRIBER_UI_PORT", "7860")),
         auth=auth,
