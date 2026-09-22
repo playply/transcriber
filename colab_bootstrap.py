@@ -16,7 +16,7 @@ from pathlib import Path
 from google.colab import drive, output, userdata
 from google.colab.output import eval_js
 
-LAUNCHER_BUILD = "bootstrap-v11"
+LAUNCHER_BUILD = "bootstrap-v12"
 REPO_URL = "https://github.com/playply/transcriber.git"
 REPO_DIR = Path("/content/transcriber")
 DRIVE_MOUNT = Path("/content/drive")
@@ -366,12 +366,19 @@ for line in ui_process.stdout:
         if tunnel_url is None:
             if tunnel_process.poll() is None:
                 tunnel_process.terminate()
-            raise RuntimeError(
-                "Temporary UI tunnel did not start. "
-                "See /content/interview-transcriber-cloudflared.log"
+            print(
+                "\n⚠ Cloudflare fallback tunnel did not start. "
+                "The Gradio UI is still running; use the Colab proxy URL above "
+                "or the Gradio public URL if it appears.",
+                flush=True,
             )
+            print(
+                "Cloudflare diagnostics: /content/interview-transcriber-cloudflared.log",
+                flush=True,
+            )
+        else:
+            print(f"\nOPTION B — CLOUDFLARE: {tunnel_url}", flush=True)
 
-        print(f"\nOPTION B — CLOUDFLARE: {tunnel_url}", flush=True)
         print(
             "OPTION A — GRADIO SHARE will appear above as 'Running on public URL' "
             "if the Gradio tunnel succeeds.",
