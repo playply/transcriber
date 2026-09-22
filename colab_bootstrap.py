@@ -11,7 +11,7 @@ from pathlib import Path
 from google.colab import drive, userdata
 from google.colab.output import eval_js
 
-LAUNCHER_BUILD = "bootstrap-v7"
+LAUNCHER_BUILD = "bootstrap-v8"
 REPO_URL = "https://github.com/playply/transcriber.git"
 REPO_DIR = Path("/content/transcriber")
 DRIVE_MOUNT = Path("/content/drive")
@@ -249,7 +249,7 @@ env["TRANSCRIBER_DRIVE_ROOT"] = "/content/drive/MyDrive"
 env["TRANSCRIBER_UI_PASSWORD"] = secrets.token_urlsafe(10)
 env["TRANSCRIBER_APP_PYTHON"] = sys.executable
 env["TRANSCRIBER_GPU_AVAILABLE"] = "1" if gpu_available else "0"
-env["TRANSCRIBER_REPO_HEAD"] = repo_head
+env["TRANSCRIBER_REPO_HEAD"] = repo_head\nenv["TRANSCRIBER_COLAB_EMBEDDED"] = "1"
 env["PYTHONUNBUFFERED"] = "1"
 
 mode = "GPU transcription mode" if gpu_available else "CPU maintenance mode"
@@ -267,16 +267,13 @@ ui_process = subprocess.Popen(
 )
 
 assert ui_process.stdout is not None
-proxy_shown = False
+iframe_shown = False
 for line in ui_process.stdout:
     print(line, end="", flush=True)
-    if not proxy_shown and "Running on local URL:" in line:
-        try:
-            proxy_url = eval_js("google.colab.kernel.proxyPort(7860)")
-            print(f"\nOpen Interview Transcriber: {proxy_url}", flush=True)
-        except Exception as exc:
-            print(f"\nCould not create Colab proxy URL automatically: {exc}", flush=True)
-        proxy_shown = True
+    if not iframe_shown and "Running on local URL:" in line:
+        print("\nOpening Interview Transcriber inside Colab...", flush=True)
+        output.serve_kernel_port_as_iframe(7860, height=900)
+        iframe_shown = True
 
 ui_return_code = ui_process.wait()
 if ui_return_code != 0:
