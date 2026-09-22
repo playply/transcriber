@@ -37,10 +37,11 @@ Multi-file processing, persistent job queues, and automatic Drive folder watchin
 2. Select a T4 GPU runtime for a new transcription. CPU mode is sufficient for maintenance on an existing transcript.
 3. Add `HF_TOKEN` to Colab Secrets and allow notebook access to it.
 4. Run the single **START INTERVIEW TRANSCRIBER** cell.
-5. The launcher refreshes the repository, mounts Drive, loads the token without printing it, prepares dependencies, and launches the temporary Gradio UI automatically.
-6. In Gradio, choose one existing `.mp4`, `.mp3`, `.m4a`, or `.wav` recording from Drive.
-7. Press **Process / Continue**. If canonical JSON already exists, the app opens it without WhisperX retranscription; otherwise it starts the GPU transcription pipeline.
-8. Resolve any meaningful unknown speakers. JSON/TXT/DOCX are regenerated beside the source recording without retranscription.
+5. The launcher refreshes the repository, mounts Drive, loads the token without printing it, prepares dependencies, launches the temporary Gradio UI, and attempts to open it automatically in a new browser tab.
+6. The UI uses a short-lived magic-link to establish a secure runtime session cookie, so there is no separate username/password form. If the browser blocks automatic tab opening, click the single **Open Interview Transcriber** button shown by the START cell.
+7. In Gradio, choose one existing `.mp4`, `.mp3`, `.m4a`, or `.wav` recording from Drive.
+8. Press **Process / Continue**. If canonical JSON already exists, the app opens it without WhisperX retranscription; otherwise it starts the GPU transcription pipeline.
+9. Resolve any meaningful unknown speakers. JSON/TXT/DOCX are regenerated beside the source recording without retranscription.
 
 Example source:
 
