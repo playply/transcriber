@@ -8,9 +8,10 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from google.colab import drive, output, userdata
+from google.colab import drive, userdata
+from google.colab.output import eval_js
 
-LAUNCHER_BUILD = "bootstrap-v6"
+LAUNCHER_BUILD = "bootstrap-v7"
 REPO_URL = "https://github.com/playply/transcriber.git"
 REPO_DIR = Path("/content/transcriber")
 DRIVE_MOUNT = Path("/content/drive")
@@ -266,13 +267,16 @@ ui_process = subprocess.Popen(
 )
 
 assert ui_process.stdout is not None
-iframe_shown = False
+proxy_shown = False
 for line in ui_process.stdout:
     print(line, end="", flush=True)
-    if not iframe_shown and "Running on local URL:" in line:
-        print("\nOpening Interview Transcriber inside Colab...", flush=True)
-        output.serve_kernel_port_as_iframe(7860, height=900)
-        iframe_shown = True
+    if not proxy_shown and "Running on local URL:" in line:
+        try:
+            proxy_url = eval_js("google.colab.kernel.proxyPort(7860)")
+            print(f"\nOpen Interview Transcriber: {proxy_url}", flush=True)
+        except Exception as exc:
+            print(f"\nCould not create Colab proxy URL automatically: {exc}", flush=True)
+        proxy_shown = True
 
 ui_return_code = ui_process.wait()
 if ui_return_code != 0:
