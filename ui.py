@@ -145,11 +145,36 @@ def _unknown_speakers_from_data(data: dict) -> tuple[list[str], dict[str, str]]:
         and item.get("speaker") != "UNKNOWN"
         and str(item.get("resolved_name") or "").strip()
     }
+    resolution_block = data.get("speaker_resolution") or {}
     resolution = {
         str(item.get("diarization_speaker")): item
-        for item in (data.get("speaker_resolution") or {}).get("results") or []
+        for item in resolution_block.get("results") or []
     }
-    unknowns = [speaker for speaker in concrete if speaker not in resolved]
+    min_chunks = int(
+        (resolution_block.get("thresholds") or {}).get("min_chunks") or 0
+    )
+
+    def needs_user_name(speaker: str) -> bool:
+        item = resolution.get(speaker)
+        if not item:
+            return True
+        reason = str(item.get("reason") or "")
+        chunks = item.get("chunks")
+        if "insufficient_usable_speech" in reason:
+            return False
+        if (
+            min_chunks > 0
+            and chunks is not None
+            and int(chunks or 0) < min_chunks
+        ):
+            return False
+        return True
+
+    unknowns = [
+        speaker
+        for speaker in concrete
+        if speaker not in resolved and needs_user_name(speaker)
+    ]
     unknowns.sort(
         key=lambda speaker: (
             -int((resolution.get(speaker) or {}).get("chunks") or 0),
