@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import html
 import json
 import os
 import secrets
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Iterator
 
 print("Loading Gradio UI...", flush=True)
 import gradio as gr
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 
 DRIVE_ROOT = Path(os.environ.get("TRANSCRIBER_DRIVE_ROOT", "/content/drive/MyDrive")).resolve()
 APP_PATH = Path(__file__).with_name("app.py").resolve()
@@ -27,6 +32,59 @@ REGISTRY_PATH = Path(
 ).resolve()
 SUPPORTED_EXTENSIONS = {".mp4", ".mp3", ".m4a", ".wav"}
 PROGRESS_PREFIX = "TRANSCRIBER_PROGRESS|"
+UI_ACCESS_TOKEN = os.environ.get("TRANSCRIBER_UI_TOKEN", "").strip()
+UI_COOKIE_NAME = "interview_transcriber_session"
+
+_PROGRESS_LOCK = threading.Lock()
+_PROGRESS_STATE = {
+    "percent": None,
+    "stage": "Idle",
+    "detail": "",
+    "active": False,
+}
+
+
+def _set_progress_state(
+    percent: float | None,
+    stage: str,
+    detail: str = "",
+    *,
+    active: bool,
+) -> None:
+    with _PROGRESS_LOCK:
+        _PROGRESS_STATE["percent"] = percent
+        _PROGRESS_STATE["stage"] = stage
+        _PROGRESS_STATE["detail"] = detail
+        _PROGRESS_STATE["active"] = active
+
+
+def _progress_html() -> str:
+    with _PROGRESS_LOCK:
+        state = dict(_PROGRESS_STATE)
+
+    percent = state["percent"]
+    if percent is None:
+        value = 0
+        label = "Idle"
+    else:
+        value = max(0, min(100, int(round(float(percent)))))
+        label = f"{value}% — {state['stage']}"
+
+    detail = str(state.get("detail") or "").strip()
+    escaped_label = html.escape(label)
+    escaped_detail = html.escape(detail)
+    detail_html = (
+        f'<div style="margin-top:6px;opacity:.8">{escaped_detail}</div>'
+        if escaped_detail
+        else ""
+    )
+    return (
+        '<div style="padding:10px 0 2px 0">'
+        f'<div style="font-weight:600;margin-bottom:6px">{escaped_label}</div>'
+        f'<progress value="{value}" max="100" style="width:100%;height:18px"></progress>'
+        f"{detail_html}"
+        "</div>"
+    )
 
 
 def _resolve_source(selected: str | None) -> Path:
@@ -461,7 +519,10 @@ def _processing_result(status: str) -> tuple:
     )
 
 
-def transcribe(selected: str | None) -> Iterator[tuple]:
+def transcribe(
+    selected: str | None,
+    progress: gr.Progress | None = None,
+) -> Iterator[tuple]:
     if not GPU_AVAILABLE:
         raise gr.Error(
             "GPU is unavailable. Use Load existing transcript or "
@@ -473,7 +534,15 @@ def transcribe(selected: str | None) -> Iterator[tuple]:
             "HF_TOKEN is not available. Restart the launcher and check Colab Secrets."
         )
 
+    _set_progress_state(
+        0,
+        "Starting transcription pipeline",
+        active=True,
+    )
+    if progress is not None:
+        progress(0.0, desc="0% — Starting transcription pipeline")
     yield _processing_result("0% — Starting transcription pipeline")
+
     for percent, stage, detail in _run_process_progress(
         [APP_PYTHON, "-u", str(APP_PATH), str(source)],
         "Transcription failed",
@@ -481,6 +550,17 @@ def transcribe(selected: str | None) -> Iterator[tuple]:
         status = f"{percent:.0f}% — {stage}"
         if detail:
             status += f"\n{detail}"
+        _set_progress_state(
+            percent,
+            stage,
+            detail,
+            active=percent < 100,
+        )
+        if progress is not None:
+            progress(
+                max(0.0, min(1.0, percent / 100.0)),
+                desc=f"{percent:.0f}% — {stage}",
+            )
         yield _processing_result(status)
 
     json_path, txt_path, docx_path = _output_paths(source)
@@ -494,7 +574,48 @@ def transcribe(selected: str | None) -> Iterator[tuple]:
             "Pipeline finished but expected output files are missing: "
             + ", ".join(missing)
         )
+
+    _set_progress_state(100, "Complete", active=False)
+    if progress is not None:
+        progress(1.0, desc="100% — Complete")
     yield _start_result(source, _result_summary(_load_canonical(source)))
+
+
+def process_or_continue(
+    selected: str | None,
+    progress=gr.Progress(),
+) -> Iterator[tuple]:
+    """Choose the safe single-file action without making the user know pipeline state."""
+    source = _resolve_source(selected)
+    json_path, txt_path, docx_path = _output_paths(source)
+
+    if json_path.is_file():
+        missing = [
+            str(path) for path in (txt_path, docx_path) if not path.is_file()
+        ]
+        if missing:
+            raise gr.Error(
+                "A canonical transcript already exists, so this recording will not be "
+                "transcribed again. Expected output files are missing: "
+                + ", ".join(missing)
+                + ". Use Advanced maintenance after repairing/regenerating outputs."
+            )
+        _set_progress_state(100, "Existing transcript loaded", active=False)
+        progress(1.0, desc="100% — Existing transcript loaded")
+        yield _start_result(
+            source,
+            "Existing transcript found. Opened without WhisperX retranscription. "
+            + _result_summary(_load_canonical(source)),
+        )
+        return
+
+    if not GPU_AVAILABLE:
+        raise gr.Error(
+            "This recording has not been transcribed yet and the current runtime has "
+            "no GPU. Restart Colab with a T4 GPU, then press Process / Continue again."
+        )
+
+    yield from transcribe(str(source), progress=progress)
 
 
 def unknown_speaker_preview(
@@ -634,19 +755,31 @@ def build_ui() -> gr.Blocks:
             label="Recording on Google Drive",
             height=420,
         )
-        with gr.Row():
-            start = gr.Button(
-                "Transcribe" if GPU_AVAILABLE else "Transcribe — GPU unavailable",
-                variant="primary",
-                interactive=GPU_AVAILABLE,
-            )
-            load_existing = gr.Button("Load existing transcript")
-            rerecognize = gr.Button("Re-recognize known speakers")
-        gr.Markdown(
-            "**Re-recognize known speakers** uses the current registry and existing "
-            "transcript. It recalculates voice matching and regenerates JSON/TXT/DOCX "
-            "without running WhisperX or diarization again."
+        process = gr.Button(
+            "Process / Continue",
+            variant="primary",
         )
+        gr.Markdown(
+            "**Process / Continue** chooses the safe action automatically: a new "
+            "recording is transcribed when GPU is available; a recording with an "
+            "existing canonical transcript opens without WhisperX retranscription."
+        )
+        progress_indicator = gr.HTML(
+            _progress_html(),
+            elem_id="transcriber-progress",
+        )
+        with gr.Accordion("Advanced maintenance", open=False):
+            gr.Markdown(
+                "Manual recovery tools. Normally use Process / Continue above."
+            )
+            with gr.Row():
+                load_existing = gr.Button("Load existing transcript")
+                rerecognize = gr.Button("Re-recognize known speakers")
+            gr.Markdown(
+                "**Re-recognize known speakers** uses the current registry and existing "
+                "transcript. It recalculates voice matching and regenerates JSON/TXT/DOCX "
+                "without running WhisperX or diarization again."
+            )
         status = gr.Textbox(label="Progress / status", interactive=False, lines=4)
         with gr.Row():
             json_output = gr.File(label="JSON")
@@ -698,7 +831,7 @@ def build_ui() -> gr.Blocks:
                 label="Registry", interactive=False, lines=12
             )
 
-        start_outputs = [
+        process_outputs = [
             status,
             json_output,
             txt_output,
@@ -709,21 +842,22 @@ def build_ui() -> gr.Blocks:
             existing_identity,
             identity_hint,
         ]
-        start.click(
-            fn=transcribe,
+        process.click(
+            fn=process_or_continue,
             inputs=recording,
-            outputs=start_outputs,
+            outputs=process_outputs,
             concurrency_limit=1,
+            show_progress="minimal",
         )
         load_existing.click(
             fn=load_existing_transcript,
             inputs=recording,
-            outputs=start_outputs,
+            outputs=process_outputs,
         )
         rerecognize.click(
             fn=rerun_known_speaker_recognition,
             inputs=recording,
-            outputs=start_outputs,
+            outputs=process_outputs,
             concurrency_limit=1,
         )
         unknown_speaker.change(
@@ -768,42 +902,113 @@ def build_ui() -> gr.Blocks:
     return demo
 
 
-def main() -> None:
-    embedded_colab = os.environ.get("TRANSCRIBER_COLAB_EMBEDDED") == "1"
-    external_tunnel = os.environ.get("TRANSCRIBER_EXTERNAL_TUNNEL") == "1"
-    username = "transcriber"
-    password = (
-        os.environ.get("TRANSCRIBER_UI_PASSWORD") or secrets.token_urlsafe(12)
+def _authorized_user(request: Request) -> str | None:
+    """Authorize Gradio requests using the short-lived runtime session cookie."""
+    if not UI_ACCESS_TOKEN:
+        return None
+    cookie = request.cookies.get(UI_COOKIE_NAME, "")
+    if cookie and secrets.compare_digest(cookie, UI_ACCESS_TOKEN):
+        return "transcriber"
+    return None
+
+
+def _build_server(demo: gr.Blocks) -> FastAPI:
+    if not UI_ACCESS_TOKEN:
+        raise RuntimeError(
+            "TRANSCRIBER_UI_TOKEN is missing. Restart the Colab launcher."
+        )
+
+    app = FastAPI(
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
 
-    if external_tunnel:
-        auth = (username, password)
-        print("\nInterview Transcriber UI credentials", flush=True)
-        print(f"Username: {username}", flush=True)
-        print(f"Password: {password}", flush=True)
-        print("Keep the temporary UI URL and password private.\n", flush=True)
-    elif embedded_colab:
-        auth = None
-        print(
-            "\nInterview Transcriber UI is protected by the active Colab session.",
-            flush=True,
+    @app.get("/", include_in_schema=False)
+    async def root() -> PlainTextResponse:
+        return PlainTextResponse(
+            "Interview Transcriber is running. Open it from the Colab START cell."
         )
-    else:
-        auth = (username, password)
-        print("\nInterview Transcriber UI credentials", flush=True)
-        print(f"Username: {username}", flush=True)
-        print(f"Password: {password}", flush=True)
-        print("Keep the temporary UI URL and password private.\n", flush=True)
 
-    demo = build_ui()
-    demo.queue(default_concurrency_limit=1)
-    demo.launch(
-        share=os.environ.get("TRANSCRIBER_GRADIO_SHARE") == "1",
-        server_name="127.0.0.1",
-        server_port=int(os.environ.get("TRANSCRIBER_UI_PORT", "7860")),
-        auth=auth,
+    @app.get("/login", include_in_schema=False)
+    async def magic_login(token: str | None = None) -> RedirectResponse:
+        if not token or not secrets.compare_digest(token, UI_ACCESS_TOKEN):
+            raise HTTPException(status_code=401, detail="Invalid or expired UI link.")
+
+        response = RedirectResponse(url="/app/", status_code=303)
+        response.set_cookie(
+            key=UI_COOKIE_NAME,
+            value=UI_ACCESS_TOKEN,
+            max_age=12 * 60 * 60,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            path="/",
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.get("/progress", include_in_schema=False)
+    async def progress_state(request: Request) -> HTMLResponse:
+        cookie = request.cookies.get(UI_COOKIE_NAME, "")
+        if not cookie or not secrets.compare_digest(cookie, UI_ACCESS_TOKEN):
+            raise HTTPException(status_code=401, detail="Unauthorized.")
+        return HTMLResponse(
+            _progress_html(),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    progress_js = r"""
+() => {
+    const refreshProgress = async () => {
+        try {
+            const response = await fetch("/progress", {
+                credentials: "same-origin",
+                cache: "no-store",
+            });
+            if (!response.ok) return;
+            const target = document.getElementById("transcriber-progress");
+            if (!target) return;
+            target.innerHTML = await response.text();
+        } catch (_) {
+            // Temporary tunnel/network interruptions should not break the UI.
+        }
+    };
+    refreshProgress();
+    window.setInterval(refreshProgress, 500);
+}
+"""
+
+    return gr.mount_gradio_app(
+        app,
+        demo,
+        path="/app",
+        auth_dependency=_authorized_user,
         allowed_paths=[str(DRIVE_ROOT)],
         show_error=True,
+        enable_monitoring=False,
+        run_history=False,
+        footer_links=[],
+        js=progress_js,
+    )
+
+
+def main() -> None:
+    demo = build_ui()
+    demo.queue(default_concurrency_limit=1)
+    app = _build_server(demo)
+    ui_port = int(os.environ.get("TRANSCRIBER_UI_PORT", "7860"))
+
+    print(
+        f"TRANSCRIBER_UI_READY|{ui_port}",
+        flush=True,
+    )
+    uvicorn.run(
+        app,
+        host="127.0.0.1",
+        port=ui_port,
+        log_level="warning",
+        access_log=False,
     )
 
 
