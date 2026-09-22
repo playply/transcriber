@@ -22,6 +22,7 @@ from IPython.display import HTML, display
 LAUNCHER_BUILD = "bootstrap-v13"
 REPO_URL = "https://github.com/playply/transcriber.git"
 REPO_DIR = Path("/content/transcriber")
+REPO_REF = os.environ.get("TRANSCRIBER_REPO_REF", "main").strip() or "main"
 DRIVE_MOUNT = Path("/content/drive")
 UI_VENV = Path("/content/transcriber-ui-venv-6.27.0")
 CORE_VERSIONS = {
@@ -121,14 +122,14 @@ if not hf_token:
     raise RuntimeError("HF_TOKEN is empty in Colab Secrets.")
 print("✓ HF_TOKEN loaded from Colab Secrets", flush=True)
 
-# 4) Get the latest application code.
+# 4) Get the requested application ref. Production defaults to main; tests may pin a PR branch.
 if (REPO_DIR / ".git").exists():
     subprocess.run(
-        ["git", "-C", str(REPO_DIR), "fetch", "--quiet", "origin", "main"],
+        ["git", "-C", str(REPO_DIR), "fetch", "--quiet", "origin", REPO_REF],
         check=True,
     )
     subprocess.run(
-        ["git", "-C", str(REPO_DIR), "reset", "--hard", "origin/main"],
+        ["git", "-C", str(REPO_DIR), "reset", "--hard", "FETCH_HEAD"],
         check=True,
         stdout=subprocess.DEVNULL,
     )
@@ -136,7 +137,7 @@ else:
     if REPO_DIR.exists():
         shutil.rmtree(REPO_DIR)
     subprocess.run(
-        ["git", "clone", "--quiet", "--branch", "main", REPO_URL, str(REPO_DIR)],
+        ["git", "clone", "--quiet", "--branch", REPO_REF, REPO_URL, str(REPO_DIR)],
         check=True,
     )
 
@@ -146,7 +147,7 @@ repo_head = subprocess.run(
     capture_output=True,
     text=True,
 ).stdout.strip()
-print(f"✓ Repository ready ({repo_head})", flush=True)
+print(f"✓ Repository ready ({repo_head}, ref={REPO_REF})", flush=True)
 
 # 5) Install the tested transcription stack only when it is actually missing/mismatched.
 if _versions_match(CORE_VERSIONS):
