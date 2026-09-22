@@ -2,16 +2,18 @@
 
 Super-lean clean-room transcription baseline for Russian interview recordings.
 
-Current scope is intentionally limited to one vertical slice:
+Current MVP scope is intentionally limited to one recording per user session:
 
-1. run in Google Colab with a T4 GPU;
-2. read an existing recording from mounted Google Drive;
-3. transcribe in Russian with WhisperX;
-4. align timestamps;
-5. diarize speakers with pyannote and automatically determine speaker count;
-6. save `*_transcript.docx`, `*_transcript.txt`, and canonical `*_transcript.json` beside the source recording.
+1. start a temporary worker in Google Colab;
+2. choose one existing recording from mounted Google Drive;
+3. use one primary **Process / Continue** action that detects whether the file needs transcription or already has a canonical transcript;
+4. transcribe in Russian with WhisperX when needed;
+5. align timestamps and diarize speakers with pyannote;
+6. recognize high-confidence known speakers from the persistent Drive registry;
+7. ask the user to resolve only meaningful unknown speakers;
+8. save `*_transcript.docx`, `*_transcript.txt`, and canonical `*_transcript.json` beside the source recording.
 
-Gradio UI and persistent speaker recognition are deliberately not implemented yet.
+Multi-file processing, persistent job queues, and automatic Drive folder watching are intentionally out of scope. The automation target is the single-file workflow around startup, state detection, speaker resolution, finalization, and GPU release.
 
 ## Security
 
@@ -19,23 +21,26 @@ Gradio UI and persistent speaker recognition are deliberately not implemented ye
 
 ## Files
 
-- `app.py` — command-line entry point.
+- `app.py` — transcription entry point plus automatic registry matching after transcription.
 - `pipeline.py` — WhisperX transcription, alignment, and pyannote diarization.
 - `exporters.py` — TXT, DOCX, and canonical JSON exporters.
-- `speaker_registry.py` — explicit placeholder for the later speaker-recognition milestone.
+- `speaker_registry.py` — persistent speaker registry and embedding storage logic.
+- `speaker_resolution.py` — known-speaker matching and transcript regeneration.
+- `confirm_speaker.py` — explicit unknown-speaker confirmation/linking.
+- `ui.py` — Gradio single-file workflow and maintenance tools.
 - `requirements.txt` — tested baseline dependency pins.
-- `colab_launcher.ipynb` — fresh-runtime launcher for Colab.
+- `colab_launcher.ipynb` / `colab_bootstrap.py` — one-cell Colab startup, Drive mount, secrets, dependencies, and automatic Gradio launch.
 
 ## Colab clean-room run
 
 1. Open `colab_launcher.ipynb` in Google Colab.
-2. Select a T4 GPU runtime.
+2. Select a T4 GPU runtime for a new transcription. CPU mode is sufficient for maintenance on an existing transcript.
 3. Add `HF_TOKEN` to Colab Secrets and allow notebook access to it.
-4. Run the cells from top to bottom.
-5. The launcher clones or refreshes `main`, installs dependencies, verifies CUDA, mounts Drive, and loads the token without printing it.
-6. Change only `SOURCE_PATH` to an existing `.mp4`, `.mp3`, `.m4a`, or `.wav` recording in Drive.
-7. Run the transcription cell.
-8. Run the final verification cell; it fails if any DOCX/TXT/JSON output is missing.
+4. Run the single **START INTERVIEW TRANSCRIBER** cell.
+5. The launcher refreshes the repository, mounts Drive, loads the token without printing it, prepares dependencies, and launches the temporary Gradio UI automatically.
+6. In Gradio, choose one existing `.mp4`, `.mp3`, `.m4a`, or `.wav` recording from Drive.
+7. Press **Process / Continue**. If canonical JSON already exists, the app opens it without WhisperX retranscription; otherwise it starts the GPU transcription pipeline.
+8. Resolve any meaningful unknown speakers. JSON/TXT/DOCX are regenerated beside the source recording without retranscription.
 
 Example source:
 
@@ -90,12 +95,13 @@ The initial pins reflect the previously tested Colab setup (`whisperx==3.8.5`, `
 
 The repository can prepare and validate the launcher, but the actual clean-room acceptance run still has to be executed in a fresh Colab T4 runtime against a real Drive recording.
 
-## Not in this milestone
+## Explicitly out of scope
 
-- Gradio or another web UI
-- speaker registry persistence
-- voice embeddings / known-speaker matching
+- multi-file transcription in one run
+- persistent transcription queues
+- automatic Drive folder watching
 - Telegram
-- Drive folder watching
 - permanent hosting
-- batch processing or dashboards
+- native Mac/iOS applications
+- paid transcription SaaS
+- dashboards, accounts, or multi-user orchestration
