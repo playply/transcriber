@@ -401,37 +401,37 @@ for line in ui_process.stdout:
                     break
             time.sleep(0.5)
 
+        if colab_proxy_url:
+            print("✓ Authenticated Colab UI ready", flush=True)
+            _present_ui_link(
+                colab_proxy_url,
+                ui_access_token,
+                label="Open Interview Transcriber",
+                auto_open=True,
+            )
+            ui_link_presented = True
+
         if tunnel_url is not None:
-            print("✓ Temporary authenticated Cloudflare UI tunnel ready", flush=True)
+            print("✓ Cloudflare fallback tunnel ready", flush=True)
             _present_ui_link(
                 tunnel_url,
                 ui_access_token,
-                label="Open Interview Transcriber — Cloudflare",
-                auto_open=True,
+                label="Open Interview Transcriber — Cloudflare fallback",
+                auto_open=False,
             )
             ui_link_presented = True
         else:
             if tunnel_process.poll() is None:
                 tunnel_process.terminate()
             print(
-                "⚠ Cloudflare tunnel did not start. "
-                "Use the authenticated Colab proxy below.",
+                "⚠ Cloudflare fallback tunnel did not start. "
+                "The Colab UI remains the primary access path.",
                 flush=True,
             )
             print(
                 "Cloudflare diagnostics: /content/interview-transcriber-cloudflared.log",
                 flush=True,
             )
-
-        if colab_proxy_url:
-            print("✓ Colab proxy fallback ready", flush=True)
-            _present_ui_link(
-                colab_proxy_url,
-                ui_access_token,
-                label="Open Interview Transcriber — Colab fallback",
-                auto_open=False,
-            )
-            ui_link_presented = True
 
         if not ui_link_presented:
             print(
