@@ -77,9 +77,11 @@ The launcher supports:
 - automatic Drive mount, secret loading, dependency preparation, and Gradio launch;
 - GPU transcription mode when T4 is available;
 - CPU maintenance mode for loading existing transcripts, re-recognition, registry operations, and manual identity confirmation;
-- temporary external UI access through a runtime magic-link that establishes an HttpOnly Secure session cookie without a separate username/password form;
-- automatic browser-open attempt from the START cell with a single-button fallback when popups are blocked;
-- a unified primary Process / Continue flow that opens an existing canonical transcript without retranscription and only starts WhisperX when no canonical transcript exists.
+- temporary authenticated UI access through a runtime magic-link that establishes an HttpOnly Secure session cookie without a separate username/password form;
+- Colab proxy as the primary UI entry path, opened automatically when the browser allows it;
+- Cloudflare Quick Tunnel retained only as a secondary fallback because its temporary DNS path can be intermittent;
+- a unified primary Process / Continue flow that opens an existing canonical transcript without retranscription and only starts WhisperX when no canonical transcript exists;
+- live stage/percentage progress delivered independently of the Gradio event queue through a lightweight authenticated progress endpoint polled by the browser.
 
 Operational rule: release the Colab runtime immediately after a full transcription is safely persisted to Drive. Do not leave T4 idle.
 
@@ -96,7 +98,16 @@ The core end-to-end MVP acceptance path is now exercised:
 7. only meaningful unresolved speakers are presented for naming;
 8. manual linking updates the registry and regenerates JSON/TXT/DOCX without retranscription;
 9. output files persist beside the source recording;
-10. a subsequent recording has successfully reused the persistent speaker registry.
+10. a subsequent recording has successfully reused the persistent speaker registry;
+11. the single-file Process / Continue flow was exercised on real recordings;
+12. passwordless magic-link access was validated through the Colab proxy;
+13. live progress was validated through intermediate stages to 100%.
+
+Observed launcher timings on 2026-09-22:
+- fresh T4 runtime to usable Gradio UI: approximately **4 min 16 sec**;
+- repeat START in the same prepared runtime: approximately **15 sec**.
+
+These timings are observational and may vary with Colab provisioning/network state.
 
 The principal remaining work is hardening and additional real-world validation, not filling a missing core MVP capability.
 
@@ -115,12 +126,10 @@ Keep the MVP single-file. Do not add multi-file transcription, a persistent job 
 
 Automation work should remove operational steps around one selected recording. Priority order:
 
-1. unified state-aware Process / Continue flow;
-2. validate the automatic magic-link Gradio entry path in a fresh Colab/browser session;
-3. automatic preflight after file selection and protection against accidental retranscription;
-4. better representative audio previews for meaningful unknown speakers;
-5. automatic finalization after the last meaningful unknown speaker is resolved;
-6. one-action runtime/GPU release after completion;
-7. benchmark startup/model caching only if measured startup cost justifies it.
+1. automatic preflight after file selection and stronger protection against accidental retranscription;
+2. better representative audio previews for meaningful unknown speakers;
+3. automatic finalization after the last meaningful unknown speaker is resolved;
+4. one-action runtime/GPU release after completion;
+5. benchmark startup/model caching only if measured startup cost justifies it.
 
 Recognition thresholds remain conservative. Continue collecting real-world scores, margins, chunk counts, false negatives, and any false positives before changing the matching policy.
