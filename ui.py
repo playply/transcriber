@@ -699,12 +699,19 @@ def build_ui() -> gr.Blocks:
 
 def main() -> None:
     embedded_colab = os.environ.get("TRANSCRIBER_COLAB_EMBEDDED") == "1"
+    external_tunnel = os.environ.get("TRANSCRIBER_EXTERNAL_TUNNEL") == "1"
     username = "transcriber"
     password = (
         os.environ.get("TRANSCRIBER_UI_PASSWORD") or secrets.token_urlsafe(12)
     )
 
-    if embedded_colab:
+    if external_tunnel:
+        auth = (username, password)
+        print("\nInterview Transcriber UI credentials", flush=True)
+        print(f"Username: {username}", flush=True)
+        print(f"Password: {password}", flush=True)
+        print("Keep the temporary UI URL and password private.\n", flush=True)
+    elif embedded_colab:
         auth = None
         print(
             "\nInterview Transcriber UI is protected by the active Colab session.",
