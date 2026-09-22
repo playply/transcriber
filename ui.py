@@ -722,7 +722,7 @@ def main() -> None:
     demo.launch(
         share=False,
         server_name="127.0.0.1",
-        server_port=7860,
+        server_port=int(os.environ.get("TRANSCRIBER_UI_PORT", "7860")),
         auth=auth,
         allowed_paths=[str(DRIVE_ROOT)],
         show_error=True,
