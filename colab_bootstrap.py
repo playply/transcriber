@@ -8,7 +8,7 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
-from google.colab import drive, userdata
+from google.colab import drive, output, userdata
 from google.colab.output import eval_js
 
 LAUNCHER_BUILD = "bootstrap-v8"
