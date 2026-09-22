@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import html
 import json
 import os
 import secrets
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Iterator
 
@@ -32,6 +35,77 @@ SUPPORTED_EXTENSIONS = {".mp4", ".mp3", ".m4a", ".wav"}
 PROGRESS_PREFIX = "TRANSCRIBER_PROGRESS|"
 UI_ACCESS_TOKEN = os.environ.get("TRANSCRIBER_UI_TOKEN", "").strip()
 UI_COOKIE_NAME = "interview_transcriber_session"
+
+_PROGRESS_LOCK = threading.Lock()
+_PROGRESS_STATE = {
+    "percent": None,
+    "stage": "Idle",
+    "detail": "",
+    "active": False,
+}
+
+
+def _set_progress_state(
+    percent: float | None,
+    stage: str,
+    detail: str = "",
+    *,
+    active: bool,
+) -> None:
+    with _PROGRESS_LOCK:
+        _PROGRESS_STATE["percent"] = percent
+        _PROGRESS_STATE["stage"] = stage
+        _PROGRESS_STATE["detail"] = detail
+        _PROGRESS_STATE["active"] = active
+
+
+def _progress_html() -> str:
+    with _PROGRESS_LOCK:
+        state = dict(_PROGRESS_STATE)
+
+    percent = state["percent"]
+    if percent is None:
+        value = 0
+        label = "Idle"
+    else:
+        value = max(0, min(100, int(round(float(percent)))))
+        label = f"{value}% — {state['stage']}"
+
+    detail = str(state.get("detail") or "").strip()
+    escaped_label = html.escape(label)
+    escaped_detail = html.escape(detail)
+    detail_html = (
+        f'<div style="margin-top:6px;opacity:.8">{escaped_detail}</div>'
+        if escaped_detail
+        else ""
+    )
+    return (
+        '<div style="padding:10px 0 2px 0">'
+        f'<div style="font-weight:600;margin-bottom:6px">{escaped_label}</div>'
+        f'<progress value="{value}" max="100" style="width:100%;height:18px"></progress>'
+        f"{detail_html}"
+        "</div>"
+    )
+
+
+def poll_progress() -> str:
+    return _progress_html()
+
+
+def test_progress_indicator() -> str:
+    steps = [
+        (0, "Starting test"),
+        (10, "Loading"),
+        (35, "Transcribing"),
+        (62, "Aligning"),
+        (84, "Diarizing"),
+        (94, "Resolving speakers"),
+        (100, "Complete"),
+    ]
+    for percent, stage in steps:
+        _set_progress_state(percent, stage, "UI-only progress test", active=percent < 100)
+        time.sleep(1)
+    return "Progress indicator test complete."
 
 
 def _resolve_source(selected: str | None) -> Path:
@@ -481,6 +555,11 @@ def transcribe(
             "HF_TOKEN is not available. Restart the launcher and check Colab Secrets."
         )
 
+    _set_progress_state(
+        0,
+        "Starting transcription pipeline",
+        active=True,
+    )
     if progress is not None:
         progress(0.0, desc="0% — Starting transcription pipeline")
     yield _processing_result("0% — Starting transcription pipeline")
@@ -492,6 +571,12 @@ def transcribe(
         status = f"{percent:.0f}% — {stage}"
         if detail:
             status += f"\n{detail}"
+        _set_progress_state(
+            percent,
+            stage,
+            detail,
+            active=percent < 100,
+        )
         if progress is not None:
             progress(
                 max(0.0, min(1.0, percent / 100.0)),
@@ -511,6 +596,7 @@ def transcribe(
             + ", ".join(missing)
         )
 
+    _set_progress_state(100, "Complete", active=False)
     if progress is not None:
         progress(1.0, desc="100% — Complete")
     yield _start_result(source, _result_summary(_load_canonical(source)))
@@ -535,6 +621,7 @@ def process_or_continue(
                 + ", ".join(missing)
                 + ". Use Advanced maintenance after repairing/regenerating outputs."
             )
+        _set_progress_state(100, "Existing transcript loaded", active=False)
         progress(1.0, desc="100% — Existing transcript loaded")
         yield _start_result(
             source,
@@ -698,6 +785,8 @@ def build_ui() -> gr.Blocks:
             "recording is transcribed when GPU is available; a recording with an "
             "existing canonical transcript opens without WhisperX retranscription."
         )
+        progress_indicator = gr.HTML(_progress_html())
+        progress_timer = gr.Timer(value=0.5, active=True)
         with gr.Accordion("Advanced maintenance", open=False):
             gr.Markdown(
                 "Manual recovery tools. Normally use Process / Continue above."
@@ -705,6 +794,12 @@ def build_ui() -> gr.Blocks:
             with gr.Row():
                 load_existing = gr.Button("Load existing transcript")
                 rerecognize = gr.Button("Re-recognize known speakers")
+                test_progress = gr.Button("Test progress indicator (7 sec)")
+            progress_test_status = gr.Textbox(
+                label="Progress test",
+                interactive=False,
+                lines=1,
+            )
             gr.Markdown(
                 "**Re-recognize known speakers** uses the current registry and existing "
                 "transcript. It recalculates voice matching and regenerates JSON/TXT/DOCX "
@@ -772,6 +867,19 @@ def build_ui() -> gr.Blocks:
             existing_identity,
             identity_hint,
         ]
+        progress_timer.tick(
+            fn=poll_progress,
+            outputs=progress_indicator,
+            queue=False,
+            show_progress="hidden",
+            concurrency_limit=None,
+        )
+        test_progress.click(
+            fn=test_progress_indicator,
+            outputs=progress_test_status,
+            concurrency_limit=1,
+            show_progress="minimal",
+        )
         process.click(
             fn=process_or_continue,
             inputs=recording,
