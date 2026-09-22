@@ -16,7 +16,7 @@ from pathlib import Path
 from google.colab import drive, output, userdata
 from google.colab.output import eval_js
 
-LAUNCHER_BUILD = "bootstrap-v10"
+LAUNCHER_BUILD = "bootstrap-v11"
 REPO_URL = "https://github.com/playply/transcriber.git"
 REPO_DIR = Path("/content/transcriber")
 DRIVE_MOUNT = Path("/content/drive")
@@ -302,6 +302,7 @@ env["TRANSCRIBER_GPU_AVAILABLE"] = "1" if gpu_available else "0"
 env["TRANSCRIBER_REPO_HEAD"] = repo_head
 env["TRANSCRIBER_COLAB_EMBEDDED"] = "0"
 env["TRANSCRIBER_EXTERNAL_TUNNEL"] = "1"
+env["TRANSCRIBER_GRADIO_SHARE"] = "1"
 env["TRANSCRIBER_UI_PORT"] = str(ui_port)
 env["PYTHONUNBUFFERED"] = "1"
 
@@ -325,7 +326,12 @@ tunnel_log_handle = None
 for line in ui_process.stdout:
     print(line, end="", flush=True)
     if tunnel_process is None and "Running on local URL:" in line:
-        print("\nStarting temporary authenticated UI tunnel...", flush=True)
+        try:
+            colab_proxy_url = eval_js(f"google.colab.kernel.proxyPort({ui_port})")
+            print(f"\nOPTION C — COLAB PROXY (experimental): {colab_proxy_url}", flush=True)
+        except Exception as exc:
+            print(f"\nColab proxy URL unavailable: {exc}", flush=True)
+        print("Starting Cloudflare fallback tunnel in parallel...", flush=True)
         tunnel_log_path = Path("/content/interview-transcriber-cloudflared.log")
         tunnel_log_handle = tunnel_log_path.open("w", encoding="utf-8")
         tunnel_process = subprocess.Popen(
@@ -365,10 +371,15 @@ for line in ui_process.stdout:
                 "See /content/interview-transcriber-cloudflared.log"
             )
 
-        print(f"\nOPEN INTERVIEW TRANSCRIBER: {tunnel_url}", flush=True)
+        print(f"\nOPTION B — CLOUDFLARE: {tunnel_url}", flush=True)
         print(
-            "Use the username/password printed above. "
-            "This temporary URL disappears with the Colab runtime.",
+            "OPTION A — GRADIO SHARE will appear above as 'Running on public URL' "
+            "if the Gradio tunnel succeeds.",
+            flush=True,
+        )
+        print(
+            "All external options use the username/password printed above. "
+            "The temporary URLs disappear with the Colab runtime.",
             flush=True,
         )
 
