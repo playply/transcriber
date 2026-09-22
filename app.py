@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from exporters import export_transcript
-from pipeline import transcribe_recording
+from pipeline import emit_progress, transcribe_recording
 from speaker_registry import load_registry
 from speaker_resolution import apply_recognition
 
@@ -93,12 +93,17 @@ def main() -> None:
         raise RuntimeError("HF_TOKEN is missing. Load it from Colab Secrets before running app.py.")
 
     result = transcribe_recording(source, hf_token=hf_token)
+
+    emit_progress(96, "Saving transcript files")
     outputs = export_transcript(result, source)
+
+    emit_progress(98, "Recognizing known speakers")
     _apply_registry_if_available(source)
 
-    print("Transcription complete.")
+    emit_progress(100, "Complete", "Transcript and speaker recognition finished")
+    print("Transcription complete.", flush=True)
     for label, path in outputs.items():
-        print(f"{label.upper()}: {path}")
+        print(f"{label.upper()}: {path}", flush=True)
 
 
 if __name__ == "__main__":
