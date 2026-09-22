@@ -8,7 +8,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 from pathlib import Path
 from typing import Iterator
 
@@ -86,26 +85,6 @@ def _progress_html() -> str:
         f"{detail_html}"
         "</div>"
     )
-
-
-def poll_progress() -> str:
-    return _progress_html()
-
-
-def test_progress_indicator() -> str:
-    steps = [
-        (0, "Starting test"),
-        (10, "Loading"),
-        (35, "Transcribing"),
-        (62, "Aligning"),
-        (84, "Diarizing"),
-        (94, "Resolving speakers"),
-        (100, "Complete"),
-    ]
-    for percent, stage in steps:
-        _set_progress_state(percent, stage, "UI-only progress test", active=percent < 100)
-        time.sleep(1)
-    return "Progress indicator test complete."
 
 
 def _resolve_source(selected: str | None) -> Path:
@@ -796,12 +775,6 @@ def build_ui() -> gr.Blocks:
             with gr.Row():
                 load_existing = gr.Button("Load existing transcript")
                 rerecognize = gr.Button("Re-recognize known speakers")
-                test_progress = gr.Button("Test progress indicator (7 sec)")
-            progress_test_status = gr.Textbox(
-                label="Progress test",
-                interactive=False,
-                lines=1,
-            )
             gr.Markdown(
                 "**Re-recognize known speakers** uses the current registry and existing "
                 "transcript. It recalculates voice matching and regenerates JSON/TXT/DOCX "
@@ -869,12 +842,6 @@ def build_ui() -> gr.Blocks:
             existing_identity,
             identity_hint,
         ]
-        test_progress.click(
-            fn=test_progress_indicator,
-            outputs=progress_test_status,
-            concurrency_limit=1,
-            show_progress="minimal",
-        )
         process.click(
             fn=process_or_continue,
             inputs=recording,
