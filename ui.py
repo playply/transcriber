@@ -16,7 +16,7 @@ print("Loading Gradio UI...", flush=True)
 import gradio as gr
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 
 DRIVE_ROOT = Path(os.environ.get("TRANSCRIBER_DRIVE_ROOT", "/content/drive/MyDrive")).resolve()
 APP_PATH = Path(__file__).with_name("app.py").resolve()
@@ -785,8 +785,10 @@ def build_ui() -> gr.Blocks:
             "recording is transcribed when GPU is available; a recording with an "
             "existing canonical transcript opens without WhisperX retranscription."
         )
-        progress_indicator = gr.HTML(_progress_html())
-        progress_timer = gr.Timer(value=0.5, active=True)
+        progress_indicator = gr.HTML(
+            _progress_html(),
+            elem_id="transcriber-progress",
+        )
         with gr.Accordion("Advanced maintenance", open=False):
             gr.Markdown(
                 "Manual recovery tools. Normally use Process / Continue above."
@@ -867,13 +869,6 @@ def build_ui() -> gr.Blocks:
             existing_identity,
             identity_hint,
         ]
-        progress_timer.tick(
-            fn=poll_progress,
-            outputs=progress_indicator,
-            queue=False,
-            show_progress="hidden",
-            concurrency_limit=None,
-        )
         test_progress.click(
             fn=test_progress_indicator,
             outputs=progress_test_status,
@@ -986,6 +981,37 @@ def _build_server(demo: gr.Blocks) -> FastAPI:
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.get("/progress", include_in_schema=False)
+    async def progress_state(request: Request) -> HTMLResponse:
+        cookie = request.cookies.get(UI_COOKIE_NAME, "")
+        if not cookie or not secrets.compare_digest(cookie, UI_ACCESS_TOKEN):
+            raise HTTPException(status_code=401, detail="Unauthorized.")
+        return HTMLResponse(
+            _progress_html(),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    progress_js = r"""
+() => {
+    const refreshProgress = async () => {
+        try {
+            const response = await fetch("/progress", {
+                credentials: "same-origin",
+                cache: "no-store",
+            });
+            if (!response.ok) return;
+            const target = document.getElementById("transcriber-progress");
+            if (!target) return;
+            target.innerHTML = await response.text();
+        } catch (_) {
+            // Temporary tunnel/network interruptions should not break the UI.
+        }
+    };
+    refreshProgress();
+    window.setInterval(refreshProgress, 500);
+}
+"""
+
     return gr.mount_gradio_app(
         app,
         demo,
@@ -996,6 +1022,7 @@ def _build_server(demo: gr.Blocks) -> FastAPI:
         enable_monitoring=False,
         run_history=False,
         footer_links=[],
+        js=progress_js,
     )
 
 
