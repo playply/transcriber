@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import secrets
 import shutil
 import socket
 import subprocess
 import sys
+import time
+import urllib.request
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from google.colab import drive, output, userdata
 from google.colab.output import eval_js
 
-LAUNCHER_BUILD = "bootstrap-v9"
+LAUNCHER_BUILD = "bootstrap-v10"
 REPO_URL = "https://github.com/playply/transcriber.git"
 REPO_DIR = Path("/content/transcriber")
 DRIVE_MOUNT = Path("/content/drive")
@@ -264,6 +268,31 @@ for candidate_port in range(7860, 7871):
 if ui_port is None:
     raise RuntimeError("No free local port available for the Gradio UI (7860-7870).")
 
+# Colab's authenticated port proxy is currently unreliable for this Gradio app,
+# so use a temporary Cloudflare Quick Tunnel. It exists only for this runtime.
+CLOUDFLARED_VERSION = "2026.9.1"
+CLOUDFLARED_SHA256 = "03f1f25d1cc93b9ad6c60569d44060bc4f17ed97075760ed8cfca4b12dcd68cc"
+cloudflared_path = Path(f"/content/cloudflared-{CLOUDFLARED_VERSION}")
+if not cloudflared_path.exists():
+    print("Preparing temporary UI tunnel...", flush=True)
+    download_url = (
+        "https://github.com/cloudflare/cloudflared/releases/download/"
+        f"{CLOUDFLARED_VERSION}/cloudflared-linux-amd64"
+    )
+    urllib.request.urlretrieve(download_url, cloudflared_path)
+    digest = hashlib.sha256(cloudflared_path.read_bytes()).hexdigest()
+    if digest != CLOUDFLARED_SHA256:
+        cloudflared_path.unlink(missing_ok=True)
+        raise RuntimeError("cloudflared checksum verification failed.")
+    cloudflared_path.chmod(0o755)
+
+subprocess.run(
+    ["pkill", "-f", "cloudflared.*tunnel.*--url"],
+    check=False,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+
 env = os.environ.copy()
 env["HF_TOKEN"] = hf_token
 env["TRANSCRIBER_DRIVE_ROOT"] = "/content/drive/MyDrive"
@@ -271,7 +300,8 @@ env["TRANSCRIBER_UI_PASSWORD"] = secrets.token_urlsafe(10)
 env["TRANSCRIBER_APP_PYTHON"] = sys.executable
 env["TRANSCRIBER_GPU_AVAILABLE"] = "1" if gpu_available else "0"
 env["TRANSCRIBER_REPO_HEAD"] = repo_head
-env["TRANSCRIBER_COLAB_EMBEDDED"] = "1"
+env["TRANSCRIBER_COLAB_EMBEDDED"] = "0"
+env["TRANSCRIBER_EXTERNAL_TUNNEL"] = "1"
 env["TRANSCRIBER_UI_PORT"] = str(ui_port)
 env["PYTHONUNBUFFERED"] = "1"
 
@@ -290,14 +320,64 @@ ui_process = subprocess.Popen(
 )
 
 assert ui_process.stdout is not None
-iframe_shown = False
+tunnel_process = None
+tunnel_log_handle = None
 for line in ui_process.stdout:
     print(line, end="", flush=True)
-    if not iframe_shown and "Running on local URL:" in line:
-        print("\nOpening Interview Transcriber inside Colab...", flush=True)
-        output.serve_kernel_port_as_iframe(ui_port, height=900)
-        iframe_shown = True
+    if tunnel_process is None and "Running on local URL:" in line:
+        print("\nStarting temporary authenticated UI tunnel...", flush=True)
+        tunnel_log_path = Path("/content/interview-transcriber-cloudflared.log")
+        tunnel_log_handle = tunnel_log_path.open("w", encoding="utf-8")
+        tunnel_process = subprocess.Popen(
+            [
+                str(cloudflared_path),
+                "tunnel",
+                "--url",
+                f"http://127.0.0.1:{ui_port}",
+                "--no-autoupdate",
+            ],
+            stdout=tunnel_log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+
+        tunnel_url = None
+        deadline = time.time() + 30
+        url_pattern = re.compile(r"https://[a-z0-9-]+\\.trycloudflare\\.com")
+        while time.time() < deadline:
+            if tunnel_process.poll() is not None:
+                break
+            if tunnel_log_path.exists():
+                tunnel_text = tunnel_log_path.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+                match = url_pattern.search(tunnel_text)
+                if match:
+                    tunnel_url = match.group(0)
+                    break
+            time.sleep(0.5)
+
+        if tunnel_url is None:
+            if tunnel_process.poll() is None:
+                tunnel_process.terminate()
+            raise RuntimeError(
+                "Temporary UI tunnel did not start. "
+                "See /content/interview-transcriber-cloudflared.log"
+            )
+
+        print(f"\nOPEN INTERVIEW TRANSCRIBER: {tunnel_url}", flush=True)
+        print(
+            "Use the username/password printed above. "
+            "This temporary URL disappears with the Colab runtime.",
+            flush=True,
+        )
 
 ui_return_code = ui_process.wait()
+
+if tunnel_process is not None and tunnel_process.poll() is None:
+    tunnel_process.terminate()
+if tunnel_log_handle is not None:
+    tunnel_log_handle.close()
+
 if ui_return_code != 0:
     raise RuntimeError(f"Gradio UI process exited with status {ui_return_code}.")
