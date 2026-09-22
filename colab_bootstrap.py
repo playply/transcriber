@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import html
+import json
 import os
 import re
 import secrets
@@ -15,8 +17,9 @@ from pathlib import Path
 
 from google.colab import drive, output, userdata
 from google.colab.output import eval_js
+from IPython.display import HTML, display
 
-LAUNCHER_BUILD = "bootstrap-v12"
+LAUNCHER_BUILD = "bootstrap-v13"
 REPO_URL = "https://github.com/playply/transcriber.git"
 REPO_DIR = Path("/content/transcriber")
 DRIVE_MOUNT = Path("/content/drive")
@@ -55,6 +58,29 @@ def _run_streamed(command: list[str], *, env: dict[str, str] | None = None) -> N
     return_code = process.wait()
     if return_code != 0:
         raise subprocess.CalledProcessError(return_code, command)
+
+
+def _present_ui_link(base_url: str, access_token: str) -> None:
+    magic_url = f"{base_url.rstrip('/')}/login?token={access_token}"
+    safe_url = html.escape(magic_url, quote=True)
+    display(
+        HTML(
+            '<p><a href="' + safe_url + '" target="_blank" '
+            'style="display:inline-block;padding:12px 18px;border-radius:8px;'
+            'background:#111;color:#fff;text-decoration:none;font-weight:600;">'
+            'Open Interview Transcriber</a></p>'
+        )
+    )
+    try:
+        eval_js(f"window.open({json.dumps(magic_url)}, '_blank')")
+        print("✓ Interview Transcriber open request sent to the browser", flush=True)
+    except Exception as exc:
+        print(
+            "Automatic tab opening was blocked or unavailable. "
+            "Use the Open Interview Transcriber button above. "
+            f"Details: {exc}",
+            flush=True,
+        )
 
 
 print(f"Interview Transcriber launcher: {LAUNCHER_BUILD}", flush=True)
@@ -296,13 +322,11 @@ subprocess.run(
 env = os.environ.copy()
 env["HF_TOKEN"] = hf_token
 env["TRANSCRIBER_DRIVE_ROOT"] = "/content/drive/MyDrive"
-env["TRANSCRIBER_UI_PASSWORD"] = secrets.token_urlsafe(10)
+ui_access_token = secrets.token_urlsafe(32)
+env["TRANSCRIBER_UI_TOKEN"] = ui_access_token
 env["TRANSCRIBER_APP_PYTHON"] = sys.executable
 env["TRANSCRIBER_GPU_AVAILABLE"] = "1" if gpu_available else "0"
 env["TRANSCRIBER_REPO_HEAD"] = repo_head
-env["TRANSCRIBER_COLAB_EMBEDDED"] = "0"
-env["TRANSCRIBER_EXTERNAL_TUNNEL"] = "1"
-env["TRANSCRIBER_GRADIO_SHARE"] = "1"
 env["TRANSCRIBER_UI_PORT"] = str(ui_port)
 env["PYTHONUNBUFFERED"] = "1"
 
@@ -323,15 +347,18 @@ ui_process = subprocess.Popen(
 assert ui_process.stdout is not None
 tunnel_process = None
 tunnel_log_handle = None
+colab_proxy_url = None
+ui_link_presented = False
 for line in ui_process.stdout:
     print(line, end="", flush=True)
-    if tunnel_process is None and "Running on local URL:" in line:
+    if tunnel_process is None and line.startswith("TRANSCRIBER_UI_READY|"):
         try:
             colab_proxy_url = eval_js(f"google.colab.kernel.proxyPort({ui_port})")
-            print(f"\nOPTION C — COLAB PROXY (experimental): {colab_proxy_url}", flush=True)
+            print("✓ Colab proxy URL prepared as fallback", flush=True)
         except Exception as exc:
-            print(f"\nColab proxy URL unavailable: {exc}", flush=True)
-        print("Starting Cloudflare fallback tunnel in parallel...", flush=True)
+            print(f"Colab proxy URL unavailable: {exc}", flush=True)
+
+        print("Starting temporary Cloudflare tunnel...", flush=True)
         tunnel_log_path = Path("/content/interview-transcriber-cloudflared.log")
         tunnel_log_handle = tunnel_log_path.open("w", encoding="utf-8")
         tunnel_process = subprocess.Popen(
@@ -363,32 +390,32 @@ for line in ui_process.stdout:
                     break
             time.sleep(0.5)
 
-        if tunnel_url is None:
+        if tunnel_url is not None:
+            print("✓ Temporary authenticated UI tunnel ready", flush=True)
+            _present_ui_link(tunnel_url, ui_access_token)
+            ui_link_presented = True
+        else:
             if tunnel_process.poll() is None:
                 tunnel_process.terminate()
             print(
-                "\n⚠ Cloudflare fallback tunnel did not start. "
-                "The Gradio UI is still running; use the Colab proxy URL above "
-                "or the Gradio public URL if it appears.",
+                "⚠ Cloudflare tunnel did not start. "
+                "Falling back to the authenticated Colab proxy.",
                 flush=True,
             )
             print(
                 "Cloudflare diagnostics: /content/interview-transcriber-cloudflared.log",
                 flush=True,
             )
-        else:
-            print(f"\nOPTION B — CLOUDFLARE: {tunnel_url}", flush=True)
+            if colab_proxy_url:
+                _present_ui_link(colab_proxy_url, ui_access_token)
+                ui_link_presented = True
 
-        print(
-            "OPTION A — GRADIO SHARE will appear above as 'Running on public URL' "
-            "if the Gradio tunnel succeeds.",
-            flush=True,
-        )
-        print(
-            "All external options use the username/password printed above. "
-            "The temporary URLs disappear with the Colab runtime.",
-            flush=True,
-        )
+        if not ui_link_presented:
+            print(
+                "No external UI URL could be prepared. Restart the START cell; "
+                "the local Gradio server is still running for diagnostics.",
+                flush=True,
+            )
 
 ui_return_code = ui_process.wait()
 
