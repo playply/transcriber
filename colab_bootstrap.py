@@ -61,24 +61,34 @@ def _run_streamed(command: list[str], *, env: dict[str, str] | None = None) -> N
         raise subprocess.CalledProcessError(return_code, command)
 
 
-def _present_ui_link(base_url: str, access_token: str) -> None:
+def _present_ui_link(
+    base_url: str,
+    access_token: str,
+    *,
+    label: str,
+    auto_open: bool = False,
+) -> None:
     magic_url = f"{base_url.rstrip('/')}/login?token={access_token}"
     safe_url = html.escape(magic_url, quote=True)
+    safe_label = html.escape(label)
     display(
         HTML(
             '<p><a href="' + safe_url + '" target="_blank" '
             'style="display:inline-block;padding:12px 18px;border-radius:8px;'
             'background:#111;color:#fff;text-decoration:none;font-weight:600;">'
-            'Open Interview Transcriber</a></p>'
+            + safe_label
+            + '</a></p>'
         )
     )
+    if not auto_open:
+        return
     try:
         eval_js(f"window.open({json.dumps(magic_url)}, '_blank')")
         print("✓ Interview Transcriber open request sent to the browser", flush=True)
     except Exception as exc:
         print(
             "Automatic tab opening was blocked or unavailable. "
-            "Use the Open Interview Transcriber button above. "
+            "Use one of the Interview Transcriber buttons above. "
             f"Details: {exc}",
             flush=True,
         )
@@ -392,24 +402,36 @@ for line in ui_process.stdout:
             time.sleep(0.5)
 
         if tunnel_url is not None:
-            print("✓ Temporary authenticated UI tunnel ready", flush=True)
-            _present_ui_link(tunnel_url, ui_access_token)
+            print("✓ Temporary authenticated Cloudflare UI tunnel ready", flush=True)
+            _present_ui_link(
+                tunnel_url,
+                ui_access_token,
+                label="Open Interview Transcriber — Cloudflare",
+                auto_open=True,
+            )
             ui_link_presented = True
         else:
             if tunnel_process.poll() is None:
                 tunnel_process.terminate()
             print(
                 "⚠ Cloudflare tunnel did not start. "
-                "Falling back to the authenticated Colab proxy.",
+                "Use the authenticated Colab proxy below.",
                 flush=True,
             )
             print(
                 "Cloudflare diagnostics: /content/interview-transcriber-cloudflared.log",
                 flush=True,
             )
-            if colab_proxy_url:
-                _present_ui_link(colab_proxy_url, ui_access_token)
-                ui_link_presented = True
+
+        if colab_proxy_url:
+            print("✓ Colab proxy fallback ready", flush=True)
+            _present_ui_link(
+                colab_proxy_url,
+                ui_access_token,
+                label="Open Interview Transcriber — Colab fallback",
+                auto_open=False,
+            )
+            ui_link_presented = True
 
         if not ui_link_presented:
             print(
