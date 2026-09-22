@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 from importlib.metadata import PackageNotFoundError, version
@@ -11,7 +12,7 @@ from pathlib import Path
 from google.colab import drive, output, userdata
 from google.colab.output import eval_js
 
-LAUNCHER_BUILD = "bootstrap-v8"
+LAUNCHER_BUILD = "bootstrap-v9"
 REPO_URL = "https://github.com/playply/transcriber.git"
 REPO_DIR = Path("/content/transcriber")
 DRIVE_MOUNT = Path("/content/drive")
@@ -243,6 +244,26 @@ if ui_check.stdout.strip() != GRADIO_VERSION:
 print(f"✓ UI environment ready (Gradio {ui_check.stdout.strip()})", flush=True)
 
 # 7) Launch the temporary authenticated Gradio UI and explicitly stream child output.
+# Stop any stale UI server left behind by an interrupted launcher run.
+subprocess.run(
+    ["pkill", "-f", str(REPO_DIR / "ui.py")],
+    check=False,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+
+ui_port = None
+for candidate_port in range(7860, 7871):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", candidate_port))
+        except OSError:
+            continue
+        ui_port = candidate_port
+        break
+if ui_port is None:
+    raise RuntimeError("No free local port available for the Gradio UI (7860-7870).")
+
 env = os.environ.copy()
 env["HF_TOKEN"] = hf_token
 env["TRANSCRIBER_DRIVE_ROOT"] = "/content/drive/MyDrive"
@@ -251,6 +272,7 @@ env["TRANSCRIBER_APP_PYTHON"] = sys.executable
 env["TRANSCRIBER_GPU_AVAILABLE"] = "1" if gpu_available else "0"
 env["TRANSCRIBER_REPO_HEAD"] = repo_head
 env["TRANSCRIBER_COLAB_EMBEDDED"] = "1"
+env["TRANSCRIBER_UI_PORT"] = str(ui_port)
 env["PYTHONUNBUFFERED"] = "1"
 
 mode = "GPU transcription mode" if gpu_available else "CPU maintenance mode"
@@ -273,7 +295,7 @@ for line in ui_process.stdout:
     print(line, end="", flush=True)
     if not iframe_shown and "Running on local URL:" in line:
         print("\nOpening Interview Transcriber inside Colab...", flush=True)
-        output.serve_kernel_port_as_iframe(7860, height=900)
+        output.serve_kernel_port_as_iframe(ui_port, height=900)
         iframe_shown = True
 
 ui_return_code = ui_process.wait()
