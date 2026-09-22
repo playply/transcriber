@@ -698,21 +698,32 @@ def build_ui() -> gr.Blocks:
 
 
 def main() -> None:
+    embedded_colab = os.environ.get("TRANSCRIBER_COLAB_EMBEDDED") == "1"
     username = "transcriber"
     password = (
         os.environ.get("TRANSCRIBER_UI_PASSWORD") or secrets.token_urlsafe(12)
     )
-    print("\nInterview Transcriber UI credentials", flush=True)
-    print(f"Username: {username}", flush=True)
-    print(f"Password: {password}", flush=True)
-    print("The UI will open inside this Colab notebook. Keep the password private.\n", flush=True)
+
+    if embedded_colab:
+        auth = None
+        print(
+            "\nInterview Transcriber UI is protected by the active Colab session.",
+            flush=True,
+        )
+    else:
+        auth = (username, password)
+        print("\nInterview Transcriber UI credentials", flush=True)
+        print(f"Username: {username}", flush=True)
+        print(f"Password: {password}", flush=True)
+        print("Keep the temporary UI URL and password private.\n", flush=True)
+
     demo = build_ui()
     demo.queue(default_concurrency_limit=1)
     demo.launch(
         share=False,
-        server_name="0.0.0.0",
+        server_name="127.0.0.1",
         server_port=7860,
-        auth=(username, password),
+        auth=auth,
         allowed_paths=[str(DRIVE_ROOT)],
         show_error=True,
     )
