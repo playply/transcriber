@@ -497,6 +497,38 @@ def transcribe(selected: str | None) -> Iterator[tuple]:
     yield _start_result(source, _result_summary(_load_canonical(source)))
 
 
+def process_or_continue(selected: str | None) -> Iterator[tuple]:
+    """Choose the safe single-file action without making the user know pipeline state."""
+    source = _resolve_source(selected)
+    json_path, txt_path, docx_path = _output_paths(source)
+
+    if json_path.is_file():
+        missing = [
+            str(path) for path in (txt_path, docx_path) if not path.is_file()
+        ]
+        if missing:
+            raise gr.Error(
+                "A canonical transcript already exists, so this recording will not be "
+                "transcribed again. Expected output files are missing: "
+                + ", ".join(missing)
+                + ". Use Advanced maintenance after repairing/regenerating outputs."
+            )
+        yield _start_result(
+            source,
+            "Existing transcript found. Opened without WhisperX retranscription. "
+            + _result_summary(_load_canonical(source)),
+        )
+        return
+
+    if not GPU_AVAILABLE:
+        raise gr.Error(
+            "This recording has not been transcribed yet and the current runtime has "
+            "no GPU. Restart Colab with a T4 GPU, then press Process / Continue again."
+        )
+
+    yield from transcribe(str(source))
+
+
 def unknown_speaker_preview(
     selected: str | None,
     diarization_speaker: str | None,
@@ -634,19 +666,27 @@ def build_ui() -> gr.Blocks:
             label="Recording on Google Drive",
             height=420,
         )
-        with gr.Row():
-            start = gr.Button(
-                "Transcribe" if GPU_AVAILABLE else "Transcribe — GPU unavailable",
-                variant="primary",
-                interactive=GPU_AVAILABLE,
-            )
-            load_existing = gr.Button("Load existing transcript")
-            rerecognize = gr.Button("Re-recognize known speakers")
-        gr.Markdown(
-            "**Re-recognize known speakers** uses the current registry and existing "
-            "transcript. It recalculates voice matching and regenerates JSON/TXT/DOCX "
-            "without running WhisperX or diarization again."
+        process = gr.Button(
+            "Process / Continue",
+            variant="primary",
         )
+        gr.Markdown(
+            "**Process / Continue** chooses the safe action automatically: a new "
+            "recording is transcribed when GPU is available; a recording with an "
+            "existing canonical transcript opens without WhisperX retranscription."
+        )
+        with gr.Accordion("Advanced maintenance", open=False):
+            gr.Markdown(
+                "Manual recovery tools. Normally use Process / Continue above."
+            )
+            with gr.Row():
+                load_existing = gr.Button("Load existing transcript")
+                rerecognize = gr.Button("Re-recognize known speakers")
+            gr.Markdown(
+                "**Re-recognize known speakers** uses the current registry and existing "
+                "transcript. It recalculates voice matching and regenerates JSON/TXT/DOCX "
+                "without running WhisperX or diarization again."
+            )
         status = gr.Textbox(label="Progress / status", interactive=False, lines=4)
         with gr.Row():
             json_output = gr.File(label="JSON")
@@ -698,7 +738,7 @@ def build_ui() -> gr.Blocks:
                 label="Registry", interactive=False, lines=12
             )
 
-        start_outputs = [
+        process_outputs = [
             status,
             json_output,
             txt_output,
@@ -709,21 +749,21 @@ def build_ui() -> gr.Blocks:
             existing_identity,
             identity_hint,
         ]
-        start.click(
-            fn=transcribe,
+        process.click(
+            fn=process_or_continue,
             inputs=recording,
-            outputs=start_outputs,
+            outputs=process_outputs,
             concurrency_limit=1,
         )
         load_existing.click(
             fn=load_existing_transcript,
             inputs=recording,
-            outputs=start_outputs,
+            outputs=process_outputs,
         )
         rerecognize.click(
             fn=rerun_known_speaker_recognition,
             inputs=recording,
-            outputs=start_outputs,
+            outputs=process_outputs,
             concurrency_limit=1,
         )
         unknown_speaker.change(
