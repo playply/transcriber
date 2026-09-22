@@ -466,7 +466,10 @@ def _processing_result(status: str) -> tuple:
     )
 
 
-def transcribe(selected: str | None) -> Iterator[tuple]:
+def transcribe(
+    selected: str | None,
+    progress: gr.Progress | None = None,
+) -> Iterator[tuple]:
     if not GPU_AVAILABLE:
         raise gr.Error(
             "GPU is unavailable. Use Load existing transcript or "
@@ -478,7 +481,10 @@ def transcribe(selected: str | None) -> Iterator[tuple]:
             "HF_TOKEN is not available. Restart the launcher and check Colab Secrets."
         )
 
+    if progress is not None:
+        progress(0.0, desc="0% — Starting transcription pipeline")
     yield _processing_result("0% — Starting transcription pipeline")
+
     for percent, stage, detail in _run_process_progress(
         [APP_PYTHON, "-u", str(APP_PATH), str(source)],
         "Transcription failed",
@@ -486,6 +492,11 @@ def transcribe(selected: str | None) -> Iterator[tuple]:
         status = f"{percent:.0f}% — {stage}"
         if detail:
             status += f"\n{detail}"
+        if progress is not None:
+            progress(
+                max(0.0, min(1.0, percent / 100.0)),
+                desc=f"{percent:.0f}% — {stage}",
+            )
         yield _processing_result(status)
 
     json_path, txt_path, docx_path = _output_paths(source)
@@ -499,10 +510,16 @@ def transcribe(selected: str | None) -> Iterator[tuple]:
             "Pipeline finished but expected output files are missing: "
             + ", ".join(missing)
         )
+
+    if progress is not None:
+        progress(1.0, desc="100% — Complete")
     yield _start_result(source, _result_summary(_load_canonical(source)))
 
 
-def process_or_continue(selected: str | None) -> Iterator[tuple]:
+def process_or_continue(
+    selected: str | None,
+    progress=gr.Progress(),
+) -> Iterator[tuple]:
     """Choose the safe single-file action without making the user know pipeline state."""
     source = _resolve_source(selected)
     json_path, txt_path, docx_path = _output_paths(source)
@@ -518,6 +535,7 @@ def process_or_continue(selected: str | None) -> Iterator[tuple]:
                 + ", ".join(missing)
                 + ". Use Advanced maintenance after repairing/regenerating outputs."
             )
+        progress(1.0, desc="100% — Existing transcript loaded")
         yield _start_result(
             source,
             "Existing transcript found. Opened without WhisperX retranscription. "
@@ -531,7 +549,7 @@ def process_or_continue(selected: str | None) -> Iterator[tuple]:
             "no GPU. Restart Colab with a T4 GPU, then press Process / Continue again."
         )
 
-    yield from transcribe(str(source))
+    yield from transcribe(str(source), progress=progress)
 
 
 def unknown_speaker_preview(
