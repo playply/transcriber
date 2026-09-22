@@ -6,7 +6,7 @@
 
 ## 1. MVP goal
 
-Build the smallest reliable workflow that takes an interview recording already stored on Google Drive, transcribes it in Russian, diarizes speakers, recognizes previously known speakers from a persistent registry, asks the user to name only unresolved speakers that have enough usable speech to identify, and saves canonical JSON plus TXT and DOCX beside the source recording.
+Build the smallest reliable single-file workflow that takes one interview recording already stored on Google Drive, transcribes it in Russian when needed, diarizes speakers, recognizes previously known speakers from a persistent registry, asks the user to name only unresolved speakers that have enough usable speech to identify, and saves canonical JSON plus TXT and DOCX beside the source recording. One Colab session is intentionally optimized around one selected recording; multi-file processing and persistent transcription queues are out of scope.
 
 Out of scope for the MVP: permanent hosting, Telegram integration, native Mac/iOS apps, paid transcription SaaS, and a large dashboard.
 
@@ -73,9 +73,12 @@ CPU maintenance verification confirmed that the test recording now presents only
 
 The launcher supports:
 
-- GPU transcription mode when T4 is available.
-- CPU maintenance mode for loading existing transcripts, re-recognition, registry operations, and manual identity confirmation.
-- Temporary external UI access paths protected with session authentication.
+- one-cell startup from GitHub;
+- automatic Drive mount, secret loading, dependency preparation, and Gradio launch;
+- GPU transcription mode when T4 is available;
+- CPU maintenance mode for loading existing transcripts, re-recognition, registry operations, and manual identity confirmation;
+- temporary external UI access paths protected with session authentication;
+- a unified primary Process / Continue flow that opens an existing canonical transcript without retranscription and only starts WhisperX when no canonical transcript exists.
 
 Operational rule: release the Colab runtime immediately after a full transcription is safely persisted to Drive. Do not leave T4 idle.
 
@@ -105,15 +108,18 @@ The principal remaining work is hardening and additional real-world validation, 
 5. Voice embeddings remain sensitive data and stay only in the user's Drive registry.
 6. Colab GPU quota and temporary tunnel reliability are operational constraints outside the core transcription logic.
 
-## 10. Next product step
+## 10. Current automation direction
 
-Do not loosen recognition thresholds based on the current false negative.
+Keep the MVP single-file. Do not add multi-file transcription, a persistent job queue, or automatic Drive folder watching.
 
-Process additional real interviews using the same gates. Collect:
-- correct high-confidence matches,
-- false negatives,
-- any false positives,
-- usable chunk counts,
-- score and margin distributions.
+Automation work should remove operational steps around one selected recording. Priority order:
 
-Only change thresholds or reference aggregation if multiple real recordings show a consistent failure pattern.
+1. unified state-aware Process / Continue flow;
+2. reduce friction opening/authenticating the temporary Gradio UI;
+3. automatic preflight after file selection and protection against accidental retranscription;
+4. better representative audio previews for meaningful unknown speakers;
+5. automatic finalization after the last meaningful unknown speaker is resolved;
+6. one-action runtime/GPU release after completion;
+7. benchmark startup/model caching only if measured startup cost justifies it.
+
+Recognition thresholds remain conservative. Continue collecting real-world scores, margins, chunk counts, false negatives, and any false positives before changing the matching policy.
