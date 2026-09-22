@@ -777,6 +777,7 @@ def build_ui() -> gr.Blocks:
             inputs=recording,
             outputs=process_outputs,
             concurrency_limit=1,
+            show_progress="minimal",
         )
         load_existing.click(
             fn=load_existing_transcript,
