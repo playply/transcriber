@@ -343,7 +343,7 @@ for line in ui_process.stdout:
 
         tunnel_url = None
         deadline = time.time() + 30
-        url_pattern = re.compile(r"https://[a-z0-9-]+\\.trycloudflare\\.com")
+        url_pattern = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
         while time.time() < deadline:
             if tunnel_process.poll() is not None:
                 break
