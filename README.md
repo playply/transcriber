@@ -33,7 +33,7 @@ Multi-file processing, persistent job queues, and automatic Drive folder watchin
 
 ## Colab clean-room run
 
-1. Open `colab_launcher.ipynb` in Google Colab.
+1. Open `colab_launcher.ipynb` in Google Colab using the same Google account whose Google Drive contains the interview recordings (or an account that has the required Drive access).
 2. Select a T4 GPU runtime for a new transcription. CPU mode is sufficient for maintenance on an existing transcript.
 3. Add `HF_TOKEN` to Colab Secrets and allow notebook access to it.
 4. Run the single **START INTERVIEW TRANSCRIBER** cell.
