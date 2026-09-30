@@ -581,6 +581,17 @@ def transcribe(
     yield _start_result(source, _result_summary(_load_canonical(source)))
 
 
+def process_start_feedback():
+    return (
+        gr.Button(value="Processing…", interactive=False),
+        "Request received — starting…",
+    )
+
+
+def process_finished_button():
+    return gr.Button(value="Process / Continue", interactive=True)
+
+
 def process_or_continue(
     selected: str | None,
     progress=gr.Progress(),
@@ -842,12 +853,23 @@ def build_ui() -> gr.Blocks:
             existing_identity,
             identity_hint,
         ]
-        process.click(
+        process_event = process.click(
+            fn=process_start_feedback,
+            outputs=[process, status],
+            queue=False,
+            show_progress="hidden",
+        ).then(
             fn=process_or_continue,
             inputs=recording,
             outputs=process_outputs,
             concurrency_limit=1,
             show_progress="minimal",
+        )
+        process_event.then(
+            fn=process_finished_button,
+            outputs=process,
+            queue=False,
+            show_progress="hidden",
         )
         load_existing.click(
             fn=load_existing_transcript,
