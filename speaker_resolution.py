@@ -53,10 +53,13 @@ def _passes_core_gates(item: dict[str, Any], thresholds: dict[str, Any]) -> bool
     return True
 
 
-def _preserved_manual_results(transcript: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _preserved_user_results(transcript: dict[str, Any]) -> dict[str, dict[str, Any]]:
     preserved: dict[str, dict[str, Any]] = {}
     for item in (transcript.get("speaker_resolution") or {}).get("results") or []:
-        if item.get("status") != "CONFIRMED" or not item.get("resolved_name"):
+        status = str(item.get("status") or "")
+        if status not in {"CONFIRMED", "SKIPPED"}:
+            continue
+        if status == "CONFIRMED" and not item.get("resolved_name"):
             continue
         speaker = str(item.get("diarization_speaker") or "")
         if speaker:
@@ -94,12 +97,13 @@ def recognize_with_split_support(
 def apply_recognition(source: Path, registry_path: Path) -> dict[str, Any]:
     """Apply current registry recognition and regenerate outputs without retranscription.
 
-    User-confirmed assignments already present in a transcript are preserved.
-    Automatic recognition is recalculated for every other diarization speaker.
+    User decisions already present in a transcript are preserved:
+    confirmed identities remain confirmed and explicit keep-unknown decisions remain
+    skipped. Automatic recognition is recalculated for every other diarization speaker.
     """
     source = source.expanduser().resolve()
     transcript = _load_transcript(source)
-    manual = _preserved_manual_results(transcript)
+    manual = _preserved_user_results(transcript)
     report = recognize_with_split_support(source, registry_path)
 
     final_results: list[dict[str, Any]] = []
@@ -107,13 +111,18 @@ def apply_recognition(source: Path, registry_path: Path) -> dict[str, Any]:
         speaker = str(item.get("diarization_speaker") or "")
         if speaker in manual:
             preserved = dict(manual[speaker])
-            preserved["reason"] = preserved.get("reason") or "user_confirmed"
+            if not preserved.get("reason"):
+                preserved["reason"] = (
+                    "user_kept_unknown"
+                    if preserved.get("status") == "SKIPPED"
+                    else "user_confirmed"
+                )
             final_results.append(preserved)
         else:
             final_results.append(item)
 
-    # Keep a confirmed speaker even if it no longer appears in the fresh embedding
-    # report (for example because it has too little usable speech in this recording).
+    # Keep an explicit user decision even if the speaker no longer appears in the
+    # fresh embedding report (for example because it has too little usable speech).
     reported = {
         str(item.get("diarization_speaker") or "") for item in final_results
     }
@@ -153,6 +162,8 @@ def apply_recognition(source: Path, registry_path: Path) -> dict[str, Any]:
             "chunks": item.get("chunks"),
             "reason": item.get("reason"),
             "voice_reference_saved": item.get("voice_reference_saved"),
+            "user_decision": item.get("user_decision"),
+            "user_decision_at": item.get("user_decision_at"),
         }
         for item in final_results
     ]
