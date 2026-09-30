@@ -425,11 +425,13 @@ def load_existing_transcript(selected: str | None):
 def _recognition_summary(report: dict) -> str:
     thresholds = report.get("thresholds") or {}
     results = report.get("results") or []
-    resolved = sum(
+    named = sum(
         1
         for item in results
         if item.get("status") in {"KNOWN", "CONFIRMED"}
     )
+    skipped = sum(1 for item in results if item.get("status") == "SKIPPED")
+    needs_decision = max(0, len(results) - named - skipped)
     lines = [
         "Known-speaker recognition refreshed from the current registry.",
         (
@@ -438,7 +440,10 @@ def _recognition_summary(report: dict) -> str:
             f"margin>={thresholds.get('margin', 0.20)}, "
             f"min_chunks={thresholds.get('min_chunks', 2)}"
         ),
-        f"Resolved diarization IDs: {resolved}/{len(results)}",
+        (
+            f"Named diarization IDs: {named}/{len(results)} · "
+            f"Kept unknown: {skipped} · Need decision: {needs_decision}"
+        ),
         "",
     ]
     for item in results:
@@ -448,6 +453,14 @@ def _recognition_summary(report: dict) -> str:
             name = item.get("resolved_name") or item.get("matched_display_name")
             lines.append(
                 f"{speaker} -> {name} [{status}] "
+                f"score={_fmt_score(item.get('score'))}, "
+                f"margin={_fmt_score(item.get('margin'))}, "
+                f"chunks={item.get('chunks')}, reason={item.get('reason')}"
+            )
+        elif status == "SKIPPED":
+            lines.append(
+                f"{speaker} -> KEPT UNKNOWN [SKIPPED] "
+                f"best={item.get('matched_display_name') or 'n/a'}, "
                 f"score={_fmt_score(item.get('score'))}, "
                 f"margin={_fmt_score(item.get('margin'))}, "
                 f"chunks={item.get('chunks')}, reason={item.get('reason')}"
