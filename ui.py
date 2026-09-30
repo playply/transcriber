@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 DRIVE_ROOT = Path(os.environ.get("TRANSCRIBER_DRIVE_ROOT", "/content/drive/MyDrive")).resolve()
 APP_PATH = Path(__file__).with_name("app.py").resolve()
 CONFIRM_TOOL_PATH = Path(__file__).with_name("confirm_speaker.py").resolve()
+SKIP_TOOL_PATH = Path(__file__).with_name("skip_speaker.py").resolve()
 RESOLUTION_TOOL_PATH = Path(__file__).with_name("speaker_resolution.py").resolve()
 APP_PYTHON = os.environ.get("TRANSCRIBER_APP_PYTHON") or sys.executable
 GPU_AVAILABLE = os.environ.get("TRANSCRIBER_GPU_AVAILABLE", "1") == "1"
@@ -252,6 +253,8 @@ def _unknown_speakers_from_data(data: dict) -> tuple[list[str], dict[str, str]]:
         item = resolution.get(speaker)
         if not item:
             return True
+        if str(item.get("status") or "") == "SKIPPED":
+            return False
         reason = str(item.get("reason") or "")
         chunks = item.get("chunks")
         if "insufficient_usable_speech" in reason:
@@ -384,7 +387,7 @@ def _result_summary(data: dict) -> str:
     bits.append(
         "Unknown speakers: " + ", ".join(unknowns) + "."
         if unknowns
-        else "All diarization speakers are resolved."
+        else "No diarization speakers need a name."
     )
     return " ".join(bits)
 
@@ -422,11 +425,13 @@ def load_existing_transcript(selected: str | None):
 def _recognition_summary(report: dict) -> str:
     thresholds = report.get("thresholds") or {}
     results = report.get("results") or []
-    resolved = sum(
+    named = sum(
         1
         for item in results
         if item.get("status") in {"KNOWN", "CONFIRMED"}
     )
+    skipped = sum(1 for item in results if item.get("status") == "SKIPPED")
+    needs_decision = max(0, len(results) - named - skipped)
     lines = [
         "Known-speaker recognition refreshed from the current registry.",
         (
@@ -435,7 +440,10 @@ def _recognition_summary(report: dict) -> str:
             f"margin>={thresholds.get('margin', 0.20)}, "
             f"min_chunks={thresholds.get('min_chunks', 2)}"
         ),
-        f"Resolved diarization IDs: {resolved}/{len(results)}",
+        (
+            f"Named diarization IDs: {named}/{len(results)} · "
+            f"Kept unknown: {skipped} · Need decision: {needs_decision}"
+        ),
         "",
     ]
     for item in results:
@@ -445,6 +453,14 @@ def _recognition_summary(report: dict) -> str:
             name = item.get("resolved_name") or item.get("matched_display_name")
             lines.append(
                 f"{speaker} -> {name} [{status}] "
+                f"score={_fmt_score(item.get('score'))}, "
+                f"margin={_fmt_score(item.get('margin'))}, "
+                f"chunks={item.get('chunks')}, reason={item.get('reason')}"
+            )
+        elif status == "SKIPPED":
+            lines.append(
+                f"{speaker} -> KEPT UNKNOWN [SKIPPED] "
+                f"best={item.get('matched_display_name') or 'n/a'}, "
                 f"score={_fmt_score(item.get('score'))}, "
                 f"margin={_fmt_score(item.get('margin'))}, "
                 f"chunks={item.get('chunks')}, reason={item.get('reason')}"
@@ -581,6 +597,17 @@ def transcribe(
     yield _start_result(source, _result_summary(_load_canonical(source)))
 
 
+def process_start_feedback():
+    return (
+        gr.Button(value="Processing…", interactive=False),
+        "Request received — starting…",
+    )
+
+
+def process_finished_button():
+    return gr.Button(value="Process / Continue", interactive=True)
+
+
 def process_or_continue(
     selected: str | None,
     progress=gr.Progress(),
@@ -712,6 +739,48 @@ def confirm_unknown_speaker(
     )
 
 
+def keep_unknown_speaker(
+    selected: str | None,
+    diarization_speaker: str | None,
+):
+    source = _resolve_source(selected)
+    if not diarization_speaker:
+        raise gr.Error("Choose an unknown speaker first.")
+
+    unknowns, _ = _unknown_speakers_from_data(_load_canonical(source))
+    if diarization_speaker not in unknowns:
+        raise gr.Error(
+            f"{diarization_speaker} is no longer unresolved. Reload the transcript."
+        )
+
+    report = _run_json_tool(
+        [
+            APP_PYTHON,
+            "-u",
+            str(SKIP_TOOL_PATH),
+            str(source),
+            diarization_speaker,
+        ],
+        "Could not keep speaker unknown",
+    )
+    outputs = report.get("outputs") or {}
+    unknown_dropdown, preview, remaining_status = _unknown_update(source)
+    return (
+        f"Kept unknown for this recording: {diarization_speaker}.\n"
+        "Speaker registry unchanged; no voice reference was saved.\n"
+        f"{remaining_status}\n"
+        "JSON/TXT/DOCX regenerated without retranscription.",
+        outputs.get("json"),
+        outputs.get("txt"),
+        outputs.get("docx"),
+        unknown_dropdown,
+        preview,
+        _identity_dropdown(),
+        "",
+        "",
+    )
+
+
 def registry_overview() -> str:
     identities = _registry_data().get("speakers") or []
     lines = [
@@ -815,9 +884,18 @@ def build_ui() -> gr.Blocks:
                 label="New person name",
                 placeholder="Required only when Existing person is blank",
             )
-            confirm_unknown = gr.Button(
-                "Link / create identity and update transcript",
-                variant="primary",
+            with gr.Row():
+                confirm_unknown = gr.Button(
+                    "Link / create identity and update transcript",
+                    variant="primary",
+                )
+                keep_unknown = gr.Button(
+                    "Keep unknown / Skip for this recording",
+                )
+            gr.Markdown(
+                "**Keep unknown** removes this diarization ID from the naming queue "
+                "for this recording only. It does not assign a name and does not "
+                "save voice references to the registry."
             )
             unknown_status = gr.Textbox(
                 label="Unknown-speaker status",
@@ -842,12 +920,23 @@ def build_ui() -> gr.Blocks:
             existing_identity,
             identity_hint,
         ]
-        process.click(
+        process_event = process.click(
+            fn=process_start_feedback,
+            outputs=[process, status],
+            queue=False,
+            show_progress="hidden",
+        ).then(
             fn=process_or_continue,
             inputs=recording,
             outputs=process_outputs,
             concurrency_limit=1,
             show_progress="minimal",
+        )
+        process_event.then(
+            fn=process_finished_button,
+            outputs=process,
+            queue=False,
+            show_progress="hidden",
         )
         load_existing.click(
             fn=load_existing_transcript,
@@ -882,6 +971,22 @@ def build_ui() -> gr.Blocks:
                 existing_identity,
                 unknown_name,
             ],
+            outputs=[
+                unknown_status,
+                json_output,
+                txt_output,
+                docx_output,
+                unknown_speaker,
+                unknown_preview,
+                existing_identity,
+                unknown_name,
+                identity_hint,
+            ],
+            concurrency_limit=1,
+        )
+        keep_unknown.click(
+            fn=keep_unknown_speaker,
+            inputs=[recording, unknown_speaker],
             outputs=[
                 unknown_status,
                 json_output,
