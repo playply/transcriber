@@ -387,7 +387,7 @@ def _result_summary(data: dict) -> str:
     bits.append(
         "Unknown speakers: " + ", ".join(unknowns) + "."
         if unknowns
-        else "All diarization speakers are resolved."
+        else "No diarization speakers need a name."
     )
     return " ".join(bits)
 
