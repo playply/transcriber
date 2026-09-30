@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 DRIVE_ROOT = Path(os.environ.get("TRANSCRIBER_DRIVE_ROOT", "/content/drive/MyDrive")).resolve()
 APP_PATH = Path(__file__).with_name("app.py").resolve()
 CONFIRM_TOOL_PATH = Path(__file__).with_name("confirm_speaker.py").resolve()
+SKIP_TOOL_PATH = Path(__file__).with_name("skip_speaker.py").resolve()
 RESOLUTION_TOOL_PATH = Path(__file__).with_name("speaker_resolution.py").resolve()
 APP_PYTHON = os.environ.get("TRANSCRIBER_APP_PYTHON") or sys.executable
 GPU_AVAILABLE = os.environ.get("TRANSCRIBER_GPU_AVAILABLE", "1") == "1"
@@ -252,6 +253,8 @@ def _unknown_speakers_from_data(data: dict) -> tuple[list[str], dict[str, str]]:
         item = resolution.get(speaker)
         if not item:
             return True
+        if str(item.get("status") or "") == "SKIPPED":
+            return False
         reason = str(item.get("reason") or "")
         chunks = item.get("chunks")
         if "insufficient_usable_speech" in reason:
@@ -723,6 +726,48 @@ def confirm_unknown_speaker(
     )
 
 
+def keep_unknown_speaker(
+    selected: str | None,
+    diarization_speaker: str | None,
+):
+    source = _resolve_source(selected)
+    if not diarization_speaker:
+        raise gr.Error("Choose an unknown speaker first.")
+
+    unknowns, _ = _unknown_speakers_from_data(_load_canonical(source))
+    if diarization_speaker not in unknowns:
+        raise gr.Error(
+            f"{diarization_speaker} is no longer unresolved. Reload the transcript."
+        )
+
+    report = _run_json_tool(
+        [
+            APP_PYTHON,
+            "-u",
+            str(SKIP_TOOL_PATH),
+            str(source),
+            diarization_speaker,
+        ],
+        "Could not keep speaker unknown",
+    )
+    outputs = report.get("outputs") or {}
+    unknown_dropdown, preview, remaining_status = _unknown_update(source)
+    return (
+        f"Kept unknown for this recording: {diarization_speaker}.\n"
+        "Speaker registry unchanged; no voice reference was saved.\n"
+        f"{remaining_status}\n"
+        "JSON/TXT/DOCX regenerated without retranscription.",
+        outputs.get("json"),
+        outputs.get("txt"),
+        outputs.get("docx"),
+        unknown_dropdown,
+        preview,
+        _identity_dropdown(),
+        "",
+        "",
+    )
+
+
 def registry_overview() -> str:
     identities = _registry_data().get("speakers") or []
     lines = [
@@ -826,9 +871,18 @@ def build_ui() -> gr.Blocks:
                 label="New person name",
                 placeholder="Required only when Existing person is blank",
             )
-            confirm_unknown = gr.Button(
-                "Link / create identity and update transcript",
-                variant="primary",
+            with gr.Row():
+                confirm_unknown = gr.Button(
+                    "Link / create identity and update transcript",
+                    variant="primary",
+                )
+                keep_unknown = gr.Button(
+                    "Keep unknown / Skip for this recording",
+                )
+            gr.Markdown(
+                "**Keep unknown** removes this diarization ID from the naming queue "
+                "for this recording only. It does not assign a name and does not "
+                "save voice references to the registry."
             )
             unknown_status = gr.Textbox(
                 label="Unknown-speaker status",
@@ -904,6 +958,22 @@ def build_ui() -> gr.Blocks:
                 existing_identity,
                 unknown_name,
             ],
+            outputs=[
+                unknown_status,
+                json_output,
+                txt_output,
+                docx_output,
+                unknown_speaker,
+                unknown_preview,
+                existing_identity,
+                unknown_name,
+                identity_hint,
+            ],
+            concurrency_limit=1,
+        )
+        keep_unknown.click(
+            fn=keep_unknown_speaker,
+            inputs=[recording, unknown_speaker],
             outputs=[
                 unknown_status,
                 json_output,
