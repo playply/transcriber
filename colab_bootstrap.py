@@ -19,7 +19,7 @@ from google.colab import drive, output, userdata
 from google.colab.output import eval_js
 from IPython.display import HTML, display
 
-LAUNCHER_BUILD = "bootstrap-v13"
+LAUNCHER_BUILD = "bootstrap-v14"
 REPO_URL = "https://github.com/playply/transcriber.git"
 REPO_DIR = Path("/content/transcriber")
 REPO_REF = os.environ.get("TRANSCRIBER_REPO_REF", "main").strip() or "main"
@@ -310,18 +310,29 @@ if ui_port is None:
 CLOUDFLARED_VERSION = "2026.9.1"
 CLOUDFLARED_SHA256 = "03f1f25d1cc93b9ad6c60569d44060bc4f17ed97075760ed8cfca4b12dcd68cc"
 cloudflared_path = Path(f"/content/cloudflared-{CLOUDFLARED_VERSION}")
-if not cloudflared_path.exists():
+cloudflared_available = cloudflared_path.exists()
+if not cloudflared_available:
     print("Preparing temporary UI tunnel...", flush=True)
     download_url = (
         "https://github.com/cloudflare/cloudflared/releases/download/"
         f"{CLOUDFLARED_VERSION}/cloudflared-linux-amd64"
     )
-    urllib.request.urlretrieve(download_url, cloudflared_path)
-    digest = hashlib.sha256(cloudflared_path.read_bytes()).hexdigest()
-    if digest != CLOUDFLARED_SHA256:
+    try:
+        urllib.request.urlretrieve(download_url, cloudflared_path)
+        digest = hashlib.sha256(cloudflared_path.read_bytes()).hexdigest()
+        if digest != CLOUDFLARED_SHA256:
+            cloudflared_path.unlink(missing_ok=True)
+            raise RuntimeError("cloudflared checksum verification failed.")
+        cloudflared_path.chmod(0o755)
+        cloudflared_available = True
+    except Exception as exc:
         cloudflared_path.unlink(missing_ok=True)
-        raise RuntimeError("cloudflared checksum verification failed.")
-    cloudflared_path.chmod(0o755)
+        cloudflared_available = False
+        print(
+            "⚠ Cloudflare tunnel binary unavailable; continuing with authenticated "
+            f"Colab proxy only. Details: {exc}",
+            flush=True,
+        )
 
 subprocess.run(
     ["pkill", "-f", "cloudflared.*tunnel.*--url"],
@@ -369,37 +380,38 @@ for line in ui_process.stdout:
         except Exception as exc:
             print(f"Colab proxy URL unavailable: {exc}", flush=True)
 
-        print("Starting temporary Cloudflare tunnel...", flush=True)
-        tunnel_log_path = Path("/content/interview-transcriber-cloudflared.log")
-        tunnel_log_handle = tunnel_log_path.open("w", encoding="utf-8")
-        tunnel_process = subprocess.Popen(
-            [
-                str(cloudflared_path),
-                "tunnel",
-                "--url",
-                f"http://127.0.0.1:{ui_port}",
-                "--no-autoupdate",
-            ],
-            stdout=tunnel_log_handle,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-
         tunnel_url = None
-        deadline = time.time() + 30
-        url_pattern = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
-        while time.time() < deadline:
-            if tunnel_process.poll() is not None:
-                break
-            if tunnel_log_path.exists():
-                tunnel_text = tunnel_log_path.read_text(
-                    encoding="utf-8", errors="replace"
-                )
-                match = url_pattern.search(tunnel_text)
-                if match:
-                    tunnel_url = match.group(0)
+        if cloudflared_available:
+            print("Starting temporary Cloudflare tunnel...", flush=True)
+            tunnel_log_path = Path("/content/interview-transcriber-cloudflared.log")
+            tunnel_log_handle = tunnel_log_path.open("w", encoding="utf-8")
+            tunnel_process = subprocess.Popen(
+                [
+                    str(cloudflared_path),
+                    "tunnel",
+                    "--url",
+                    f"http://127.0.0.1:{ui_port}",
+                    "--no-autoupdate",
+                ],
+                stdout=tunnel_log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+
+            deadline = time.time() + 30
+            url_pattern = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+            while time.time() < deadline:
+                if tunnel_process.poll() is not None:
                     break
-            time.sleep(0.5)
+                if tunnel_log_path.exists():
+                    tunnel_text = tunnel_log_path.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                    match = url_pattern.search(tunnel_text)
+                    if match:
+                        tunnel_url = match.group(0)
+                        break
+                time.sleep(0.5)
 
         if colab_proxy_url:
             print("✓ Authenticated Colab UI ready", flush=True)
@@ -421,17 +433,24 @@ for line in ui_process.stdout:
             )
             ui_link_presented = True
         else:
-            if tunnel_process.poll() is None:
+            if tunnel_process is not None and tunnel_process.poll() is None:
                 tunnel_process.terminate()
-            print(
-                "⚠ Cloudflare fallback tunnel did not start. "
-                "The Colab UI remains the primary access path.",
-                flush=True,
-            )
-            print(
-                "Cloudflare diagnostics: /content/interview-transcriber-cloudflared.log",
-                flush=True,
-            )
+            if cloudflared_available:
+                print(
+                    "⚠ Cloudflare fallback tunnel did not start. "
+                    "The Colab UI remains the primary access path.",
+                    flush=True,
+                )
+                print(
+                    "Cloudflare diagnostics: /content/interview-transcriber-cloudflared.log",
+                    flush=True,
+                )
+            else:
+                print(
+                    "⚠ Cloudflare fallback unavailable. "
+                    "Using the authenticated Colab UI only.",
+                    flush=True,
+                )
 
         if not ui_link_presented:
             print(
