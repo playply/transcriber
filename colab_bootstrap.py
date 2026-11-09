@@ -19,7 +19,7 @@ from google.colab import drive, output, userdata
 from google.colab.output import eval_js
 from IPython.display import HTML, display
 
-LAUNCHER_BUILD = "bootstrap-v14"
+LAUNCHER_BUILD = "bootstrap-v15"
 REPO_URL = "https://github.com/playply/transcriber.git"
 REPO_DIR = Path("/content/transcriber")
 REPO_REF = os.environ.get("TRANSCRIBER_REPO_REF", "main").strip() or "main"
@@ -421,6 +421,22 @@ for line in ui_process.stdout:
                 label="Open Interview Transcriber",
                 auto_open=True,
             )
+            try:
+                output.serve_kernel_port_as_iframe(
+                    ui_port,
+                    path=f"/login?token={ui_access_token}",
+                    height="900",
+                )
+                print(
+                    "✓ Embedded Interview Transcriber displayed below the cell",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    "⚠ Embedded Colab UI unavailable; use the link above instead. "
+                    f"Details: {exc}",
+                    flush=True,
+                )
             ui_link_presented = True
 
         if tunnel_url is not None:
